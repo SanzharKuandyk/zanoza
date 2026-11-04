@@ -53,7 +53,7 @@ pub fn main() !void {
         30 * std.time.ns_per_s,
         &.{bind},
         false,
-        [_]u8{0xAA} ** 32,
+        @as([32]u8, @splat(0xAA)),
         null,
     );
 

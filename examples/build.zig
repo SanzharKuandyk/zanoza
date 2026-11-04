@@ -63,7 +63,8 @@ pub fn build(b: *std.Build) void {
 
     const run_pong_client = b.addRunArtifact(pong_client);
     run_pong_client.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_pong_client.addArgs(args);
+    // pass args to client
+    run_pong_client.addPassthruArgs();
     const pong_client_step = b.step("pong-client", "Run the pong client");
     pong_client_step.dependOn(&run_pong_client.step);
 
@@ -113,7 +114,8 @@ pub fn build(b: *std.Build) void {
 
     const run_ball_client = b.addRunArtifact(ball_client);
     run_ball_client.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_ball_client.addArgs(args);
+    // pass args to server
+    run_ball_client.addPassthruArgs();
     const ball_client_step = b.step("ball-client", "Run the ball client");
     ball_client_step.dependOn(&run_ball_client.step);
 }

@@ -13,9 +13,9 @@ fn checkOpen(comptime T: type) void {
         @compileError("Socket missing: pub fn open(zenet.Address) !" ++ @typeName(T));
     switch (@typeInfo(@TypeOf(T.open))) {
         .@"fn" => |fi| {
-            if (fi.params.len != 1)
+            if (fi.param_types.len != 1)
                 @compileError("Socket.open must take exactly one parameter (zenet.Address)");
-            const p0 = fi.params[0].type orelse
+            const p0 = fi.param_types[0] orelse
                 @compileError("Socket.open parameter must be a concrete type (zenet.Address)");
             if (p0 != Address)
                 @compileError("Socket.open parameter must be zenet.Address, got " ++ @typeName(p0));
@@ -38,9 +38,9 @@ fn checkClose(comptime T: type) void {
         @compileError("Socket missing: pub fn close(*" ++ @typeName(T) ++ ") void");
     switch (@typeInfo(@TypeOf(T.close))) {
         .@"fn" => |fi| {
-            if (fi.params.len != 1)
+            if (fi.param_types.len != 1)
                 @compileError("Socket.close must take exactly one parameter (*" ++ @typeName(T) ++ ")");
-            const p0 = fi.params[0].type orelse
+            const p0 = fi.param_types[0] orelse
                 @compileError("Socket.close parameter must be a concrete type (*" ++ @typeName(T) ++ ")");
             if (p0 != *T)
                 @compileError("Socket.close parameter must be *" ++ @typeName(T) ++ ", got " ++ @typeName(p0));
@@ -58,13 +58,13 @@ fn checkRecvfrom(comptime T: type) void {
         @compileError("Socket missing: pub fn recvfrom(*" ++ @typeName(T) ++ ", []u8) ?RecvResult");
     switch (@typeInfo(@TypeOf(T.recvfrom))) {
         .@"fn" => |fi| {
-            if (fi.params.len != 2)
+            if (fi.param_types.len != 2)
                 @compileError("Socket.recvfrom must take exactly 2 parameters (*T, []u8)");
-            const p0 = fi.params[0].type orelse
+            const p0 = fi.param_types[0] orelse
                 @compileError("Socket.recvfrom first parameter must be *" ++ @typeName(T));
             if (p0 != *T)
                 @compileError("Socket.recvfrom first parameter must be *" ++ @typeName(T) ++ ", got " ++ @typeName(p0));
-            const p1 = fi.params[1].type orelse
+            const p1 = fi.param_types[1] orelse
                 @compileError("Socket.recvfrom second parameter must be []u8");
             if (p1 != []u8)
                 @compileError("Socket.recvfrom second parameter must be []u8, got " ++ @typeName(p1));
@@ -94,17 +94,17 @@ fn checkSendto(comptime T: type) void {
         @compileError("Socket missing: pub fn sendto(*" ++ @typeName(T) ++ ", zenet.Address, []const u8) void");
     switch (@typeInfo(@TypeOf(T.sendto))) {
         .@"fn" => |fi| {
-            if (fi.params.len != 3)
+            if (fi.param_types.len != 3)
                 @compileError("Socket.sendto must take exactly 3 parameters (*T, zenet.Address, []const u8)");
-            const p0 = fi.params[0].type orelse
+            const p0 = fi.param_types[0] orelse
                 @compileError("Socket.sendto first parameter must be *" ++ @typeName(T));
             if (p0 != *T)
                 @compileError("Socket.sendto first parameter must be *" ++ @typeName(T) ++ ", got " ++ @typeName(p0));
-            const p1 = fi.params[1].type orelse
+            const p1 = fi.param_types[1] orelse
                 @compileError("Socket.sendto second parameter must be zenet.Address");
             if (p1 != Address)
                 @compileError("Socket.sendto second parameter must be zenet.Address, got " ++ @typeName(p1));
-            const p2 = fi.params[2].type orelse
+            const p2 = fi.param_types[2] orelse
                 @compileError("Socket.sendto third parameter must be []const u8");
             if (p2 != []const u8)
                 @compileError("Socket.sendto third parameter must be []const u8, got " ++ @typeName(p2));

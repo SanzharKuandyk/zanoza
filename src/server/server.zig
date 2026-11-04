@@ -100,7 +100,7 @@ pub fn Server(comptime opts: Options) type {
                 .io_threaded = io_threaded,
                 .start_time = now,
                 .current_time = now,
-                .clients = [_]?Conn{null} ** opts.max_clients,
+                .clients = @as([opts.max_clients]?Conn, @splat(null)),
                 .addr_to_slot = .empty,
                 .recycled_slots = .{},
                 .slot_cursor = 0,

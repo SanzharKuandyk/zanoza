@@ -11,7 +11,7 @@ const Slot = struct {
     y: f32 = proto.H / 2,
 };
 
-var slots: [4]Slot = [_]Slot{.{}} ** 4;
+var slots: [4]Slot = @splat(.{});
 
 fn sleepNs(ns: u64) !void {
     var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
@@ -34,7 +34,7 @@ pub fn main() !void {
         30 * std.time.ns_per_s,
         &.{bind},
         false,
-        [_]u8{0xAA} ** 32,
+        @as([32]u8, @splat(0xAA)),
         null,
     );
 

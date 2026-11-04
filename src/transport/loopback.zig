@@ -41,7 +41,7 @@ const Entry = struct {
 };
 
 const Queue = struct {
-    entries: [QUEUE_CAP]Entry = [_]Entry{.{}} ** QUEUE_CAP,
+    entries: [QUEUE_CAP]Entry = @splat(.{}),
     head: usize = 0,
     tail: usize = 0,
     count: usize = 0,

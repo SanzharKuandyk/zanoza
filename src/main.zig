@@ -12,7 +12,7 @@ const Srv = zenet.TransportServer(opts, void);
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
-    const challenge_key = [_]u8{0} ** 32;
+    const challenge_key: [32]u8 = @splat(0);
     const cfg = zenet.ServerConfig.init(
         1,
         5000,

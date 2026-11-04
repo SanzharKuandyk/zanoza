@@ -47,7 +47,7 @@ fn testAddr(port: u16) zenet.Address {
 }
 
 fn serverCfg() zenet.ServerConfig {
-    return zenet.ServerConfig.init(1, 5000, 10000, &.{}, false, [_]u8{0} ** 32, null);
+    return zenet.ServerConfig.init(1, 5000, 10000, &.{}, false, @as([32]u8, @splat(0)), null);
 }
 
 fn clientCfg(port: u16) zenet.ClientConfig {
@@ -147,7 +147,7 @@ test "server disconnects idle client on timeout" {
     const timeout_ns = 1 * std.time.ns_per_ms;
     var srv = try Srv.init(
         testing.allocator,
-        zenet.ServerConfig.init(1, 5000, timeout_ns, &.{}, false, [_]u8{0} ** 32, null),
+        zenet.ServerConfig.init(1, 5000, timeout_ns, &.{}, false, @as([32]u8, @splat(0)), null),
     );
     defer srv.deinit();
 
@@ -255,7 +255,7 @@ test "client sendPayload reaches server as message" {
 // ---------------------------------------------------------------------------
 
 test "channel header round-trip through payload body" {
-    var body: [opts.max_payload_size]u8 = [_]u8{0} ** opts.max_payload_size;
+    var body: [opts.max_payload_size]u8 = @splat(0);
 
     // Encode a channel 1, seq 42, with user data
     channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], 1, 42);
@@ -272,7 +272,7 @@ test "channel header round-trip through payload body" {
 }
 
 test "channel ACK header round-trip" {
-    var body: [opts.max_payload_size]u8 = [_]u8{0} ** opts.max_payload_size;
+    var body: [opts.max_payload_size]u8 = @splat(0);
     channel_mod.encodeAck(body[0..channel_mod.HEADER_SIZE], 2, 99);
 
     const hdr = channel_mod.Header.decode(&body).?;
@@ -308,11 +308,11 @@ test "UnreliableLatest drops older sequence via state machine relay" {
     // Simulate two payloads where second has lower channel seq (out-of-order)
     var state: channel_mod.UnreliableLatestState = .{};
 
-    var body1: [opts.max_payload_size]u8 = [_]u8{0} ** opts.max_payload_size;
+    var body1: [opts.max_payload_size]u8 = @splat(0);
     channel_mod.encodeHeader(body1[0..channel_mod.HEADER_SIZE], 1, 10); // ch1, seq=10
     body1[channel_mod.HEADER_SIZE] = 0xAA;
 
-    var body2: [opts.max_payload_size]u8 = [_]u8{0} ** opts.max_payload_size;
+    var body2: [opts.max_payload_size]u8 = @splat(0);
     channel_mod.encodeHeader(body2[0..channel_mod.HEADER_SIZE], 1, 5); // ch1, seq=5 (older)
     body2[channel_mod.HEADER_SIZE] = 0xBB;
 
@@ -355,10 +355,10 @@ test "reliable channel state stores and acks data" {
 test "default connect token wire round-trip and address authorization" {
     const Token = zenet.handshake.DefaultConnectToken(opts.user_data_size, opts.max_token_addresses);
 
-    const secret_key = [_]u8{7} ** zenet.SECRET_KEY_SIZE;
+    const secret_key: [zenet.SECRET_KEY_SIZE]u8 = @splat(7);
     const allowed_addr = testAddr(41000);
     const denied_addr = testAddr(41001);
-    const user_data: [opts.user_data_size]u8 = [_]u8{0x5A} ** opts.user_data_size;
+    const user_data: [opts.user_data_size]u8 = @splat(0x5A);
 
     const token = try Token.create(99, 10_000, &.{allowed_addr}, user_data, &secret_key);
     var buf: [Token.wire_size]u8 = undefined;
@@ -385,7 +385,7 @@ const cli_addr: zenet.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port =
 /// Server config suitable for transport-layer tests that run tick() with real time.
 fn transportServerCfg() zenet.ServerConfig {
     const ns_per_s = std.time.ns_per_s;
-    return zenet.ServerConfig.init(1, 5 * ns_per_s, 30 * ns_per_s, &.{}, false, [_]u8{0} ** 32, null);
+    return zenet.ServerConfig.init(1, 5 * ns_per_s, 30 * ns_per_s, &.{}, false, @as([32]u8, @splat(0)), null);
 }
 
 fn loopbackClientCfg() zenet.ClientConfig {
@@ -598,7 +598,7 @@ test "transport loopback: client ignores packets from non-server address" {
     const fake_pkt: Pkt = .{ .Challenge = .{
         .sequence = 1,
         .expires_at = 10_000,
-        .token = [_]u8{0xAA} ** 16,
+        .token = @as([16]u8, @splat(0xAA)),
     } };
     const len = try packet_mod.serialize(opts, fake_pkt, buf[0..]);
     attacker.sendto(srv_addr, buf[0..len]);
@@ -678,7 +678,7 @@ test "transport loopback: fragmented ReliableOrdered channel assembles correctly
 
     var fsrv = try FSrv.initWithSocket(
         testing.allocator,
-        zenet.ServerConfig.init(1, 5 * std.time.ns_per_s, 30 * std.time.ns_per_s, &.{}, false, [_]u8{0} ** 32, null),
+        zenet.ServerConfig.init(1, 5 * std.time.ns_per_s, 30 * std.time.ns_per_s, &.{}, false, @as([32]u8, @splat(0)), null),
         fpair.serverSocket(faddr_srv),
     );
     defer fsrv.deinit();

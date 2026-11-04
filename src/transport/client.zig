@@ -92,7 +92,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
         frags_received: u8 = 0,
         total_size: u16 = 0,
         data: ?[]u8 = null,
-        received_mask: [32]u8 = [_]u8{0} ** 32,
+        received_mask: [32]u8 = @splat(0),
         active: bool = false,
 
         fn hasFrag(self: *const @This(), fi: u8) bool {
@@ -113,7 +113,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
 
     const FragChannelState = struct {
         next_msg_id: u16 = 0,
-        slots: [FRAG_ASSEMBLY_SLOTS]AssemblyBuf = [_]AssemblyBuf{.{}} ** FRAG_ASSEMBLY_SLOTS,
+        slots: [FRAG_ASSEMBLY_SLOTS]AssemblyBuf = @splat(.{}),
 
         fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             for (&self.slots) |*s| s.deinit(allocator);
@@ -173,11 +173,11 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
                 .cli = cli,
                 .socket = socket,
                 .allocator = std.heap.page_allocator,
-                .ordered_state = [_]OrderedChannelState{.{}} ** OrderedCount,
-                .unordered_state = [_]UnorderedChannelState{.{}} ** UnorderedCount,
-                .ul_state = [_]UlChannelState{.{}} ** UlCount,
+                .ordered_state = @as([OrderedCount]OrderedChannelState, @splat(.{})),
+                .unordered_state = @as([UnorderedCount]UnorderedChannelState, @splat(.{})),
+                .ul_state = @as([UlCount]UlChannelState, @splat(.{})),
                 .rtt_state = .{},
-                .frag_state = [_]FragChannelState{.{}} ** Frag,
+                .frag_state = @as([Frag]FragChannelState, @splat(.{})),
                 .events = .{},
                 .messages = .{},
             };
@@ -610,7 +610,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
                     .frags_received = 0,
                     .total_size = frag.total_size,
                     .data = data,
-                    .received_mask = [_]u8{0} ** 32,
+                    .received_mask = @as([32]u8, @splat(0)),
                     .active = true,
                 };
             }
@@ -697,11 +697,11 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             for (0..Frag) |idx| {
                 self.frag_state[idx].deinit(self.allocator);
             }
-            self.ordered_state = [_]OrderedChannelState{.{}} ** OrderedCount;
-            self.unordered_state = [_]UnorderedChannelState{.{}} ** UnorderedCount;
-            self.ul_state = [_]UlChannelState{.{}} ** UlCount;
+            self.ordered_state = @as([OrderedCount]OrderedChannelState, @splat(.{}));
+            self.unordered_state = @as([UnorderedCount]UnorderedChannelState, @splat(.{}));
+            self.ul_state = @as([UlCount]UlChannelState, @splat(.{}));
             self.rtt_state = .{};
-            self.frag_state = [_]FragChannelState{.{}} ** Frag;
+            self.frag_state = @as([Frag]FragChannelState, @splat(.{}));
         }
 
         fn clearMessages(self: *Self) void {

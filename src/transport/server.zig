@@ -87,7 +87,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         frags_received: u8 = 0,
         total_size: u16 = 0,
         data: ?[]u8 = null,
-        received_mask: [32]u8 = [_]u8{0} ** 32,
+        received_mask: [32]u8 = @splat(0),
         active: bool = false,
 
         fn hasFrag(self: *const @This(), fi: u8) bool {
@@ -108,7 +108,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
 
     const FragChannelState = struct {
         next_msg_id: u16 = 0,
-        slots: [FRAG_ASSEMBLY_SLOTS]AssemblyBuf = [_]AssemblyBuf{.{}} ** FRAG_ASSEMBLY_SLOTS,
+        slots: [FRAG_ASSEMBLY_SLOTS]AssemblyBuf = @splat(.{}),
 
         fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             for (&self.slots) |*s| s.deinit(allocator);
@@ -178,24 +178,24 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         pub fn initWithSocket(allocator: std.mem.Allocator, config: root.ServerConfig, socket: Socket) !Self {
             const ordered_state = try allocator.create([opts.max_clients][OrderedCount]OrderedChannelState);
             errdefer allocator.destroy(ordered_state);
-            for (ordered_state) |*row| row.* = [_]OrderedChannelState{.{}} ** OrderedCount;
+            for (ordered_state) |*row| row.* = @as([OrderedCount]OrderedChannelState, @splat(.{}));
 
             const unordered_state = try allocator.create([opts.max_clients][UnorderedCount]UnorderedChannelState);
             errdefer allocator.destroy(unordered_state);
-            for (unordered_state) |*row| row.* = [_]UnorderedChannelState{.{}} ** UnorderedCount;
+            for (unordered_state) |*row| row.* = @as([UnorderedCount]UnorderedChannelState, @splat(.{}));
 
             const ul_state = try allocator.create([opts.max_clients][UlCount]UlChannelState);
             errdefer allocator.destroy(ul_state);
-            for (ul_state) |*row| row.* = [_]UlChannelState{.{}} ** UlCount;
+            for (ul_state) |*row| row.* = @as([UlCount]UlChannelState, @splat(.{}));
 
             const rtt_state = try allocator.create([opts.max_clients]channel_mod.RttState);
             errdefer allocator.destroy(rtt_state);
-            rtt_state.* = [_]channel_mod.RttState{.{}} ** opts.max_clients;
+            rtt_state.* = @as([opts.max_clients]channel_mod.RttState, @splat(.{}));
 
             const frag_state: if (Frag > 0) *[opts.max_clients][Frag]FragChannelState else void =
                 if (comptime Frag > 0) blk: {
                     const p = try allocator.create([opts.max_clients][Frag]FragChannelState);
-                    for (p) |*row| row.* = [_]FragChannelState{.{}} ** Frag;
+                    for (p) |*row| row.* = @as([Frag]FragChannelState, @splat(.{}));
                     break :blk p;
                 } else {};
             errdefer if (comptime Frag > 0) allocator.destroy(frag_state);
@@ -669,7 +669,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                     .frags_received = 0,
                     .total_size = frag.total_size,
                     .data = data,
-                    .received_mask = [_]u8{0} ** 32,
+                    .received_mask = @as([32]u8, @splat(0)),
                     .active = true,
                 };
             }
@@ -774,12 +774,12 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                 for (0..Frag) |idx| {
                     self.frag_state[slot][idx].deinit(self.allocator);
                 }
-                self.frag_state[slot] = [_]FragChannelState{.{}} ** Frag;
+                self.frag_state[slot] = @as([Frag]FragChannelState, @splat(.{}));
             }
 
-            self.ordered_state[slot] = [_]OrderedChannelState{.{}} ** OrderedCount;
-            self.unordered_state[slot] = [_]UnorderedChannelState{.{}} ** UnorderedCount;
-            self.ul_state[slot] = [_]UlChannelState{.{}} ** UlCount;
+            self.ordered_state[slot] = @as([OrderedCount]OrderedChannelState, @splat(.{}));
+            self.unordered_state[slot] = @as([UnorderedCount]UnorderedChannelState, @splat(.{}));
+            self.ul_state[slot] = @as([UlCount]UlChannelState,@splat(.{}));
             self.rtt_state[slot] = .{};
         }
 

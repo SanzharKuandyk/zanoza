@@ -70,10 +70,10 @@ pub fn DefaultConnectToken(comptime user_data_size: usize, comptime max_addresse
         ) !Self {
             if (public_addresses.len > max_addresses) return error.TooManyAddresses;
 
-            var normalized = [_]AddressKey{.{
-                .ip = [_]u8{0} ** 16,
+            var normalized: [max_addresses]AddressKey = @splat(.{
+                .ip = @as([16]u8, @splat(0)),
                 .port = 0,
-            }} ** max_addresses;
+            });
             for (public_addresses, 0..) |addr, i| {
                 normalized[i] = AddressKey.fromAddress(addr);
             }
@@ -127,10 +127,10 @@ pub fn DefaultConnectToken(comptime user_data_size: usize, comptime max_addresse
             const address_count = bytes[16];
             if (address_count > max_addresses) return null;
 
-            var public_addresses = [_]AddressKey{.{
-                .ip = [_]u8{0} ** 16,
+            var public_addresses: [max_addresses]AddressKey = @splat(.{
+                .ip = @as([16]u8, @splat(0)),
                 .port = 0,
-            }} ** max_addresses;
+            });
 
             var offset: usize = 17;
             for (0..max_addresses) |i| {

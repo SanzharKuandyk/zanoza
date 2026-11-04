@@ -20,12 +20,12 @@ const Ball = struct {
 };
 
 var my_id: ?u8 = null;
-var balls: [4]Ball = [_]Ball{.{}} ** 4;
+var balls: [4]Ball = @splat(.{});
 var connected = false;
 
 const MAX_LINES = 8;
 const ChatLine = struct { buf: [proto.MAX_CHAT]u8 = undefined, len: usize = 0 };
-var chat_lines: [MAX_LINES]ChatLine = [_]ChatLine{.{}} ** MAX_LINES;
+var chat_lines: [MAX_LINES]ChatLine = @splat(.{});
 var chat_count: usize = 0;
 var chat_input: [proto.MAX_CHAT]u8 = undefined;
 var chat_input_len: usize = 0;
@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
                 .Connected => {
                     connected = true;
                     my_id = null;
-                    balls = [_]Ball{.{}} ** 4; // clear peer state for the new session
+                    balls = @splat(.{}); // clear peer state for the new session
                     appendChat("Connected!");
                 },
                 .Disconnected => {

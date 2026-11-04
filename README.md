@@ -12,7 +12,7 @@ Connection-oriented game networking library for Zig. Provides a
 challenge-response handshake (HMAC-SHA256) and a channel system on top of
 unreliable UDP. Inspired by [renet](https://github.com/lucaspoffo/renet).
 
-**Requires Zig 0.16.0**
+**Requires Zig 0.17.0**
 
 ---
 
@@ -66,10 +66,6 @@ Controls: `W`/`S` to move · `T` to chat · `Space` to ready up after a round
 
 ## Quick start
 
-Most of the Zig 0.16 migration is internal. From the user side, the main
-visible change is that addresses are now `zenet.Address` (an alias for
-`std.Io.net.IpAddress`), while the transport and channel APIs stay the same.
-
 ```zig
 const zenet = @import("zenet");
 const std   = @import("std");
@@ -95,7 +91,7 @@ var srv = try Srv.init(allocator, zenet.ServerConfig.init(
     30 * std.time.ns_per_s,     // client_timeout_ns
     &.{},                       // public addresses (secure mode only)
     false,                      // secure
-    [_]u8{0} ** 32,             // challenge key
+    @as([32]u8, @splat(0)),                  // challenge key
     null,                       // secret key (secure mode only)
 ), try zenet.Address.parseIp4("0.0.0.0", 9000));
 defer srv.deinit();

@@ -29,7 +29,7 @@ var connected = false;
 
 const MAX_LINES = 12;
 const ChatLine = struct { buf: [proto.MAX_CHAT_LEN]u8 = undefined, len: usize = 0 };
-var chat_lines: [MAX_LINES]ChatLine = [_]ChatLine{.{}} ** MAX_LINES;
+var chat_lines: [MAX_LINES]ChatLine = @splat(.{});
 var chat_count: usize = 0;
 var chat_input: [proto.MAX_CHAT_LEN]u8 = undefined;
 var chat_input_len: usize = 0;

@@ -9,7 +9,7 @@ pub const AddressKey = struct {
 
     pub fn fromAddress(addr: Address) AddressKey {
         var out: AddressKey = .{
-            .ip = [_]u8{0} ** 16,
+            .ip = @as([16]u8, @splat(0)),
             .port = 0,
         };
 

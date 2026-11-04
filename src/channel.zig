@@ -272,7 +272,7 @@ pub fn ReliableState(comptime buf_size: usize, comptime data_cap: usize) type {
         };
 
         send_seq: u16 = 0,
-        entries: [buf_size]Entry = [_]Entry{.{}} ** buf_size,
+        entries: [buf_size]Entry = @splat(.{}),
 
         /// Enqueue a message for reliable delivery. Returns the assigned sequence number,
         /// or null if the send buffer is full (the slot for the next seq is still unACKed).
@@ -415,7 +415,7 @@ pub fn ReliableOrderedRecvState(
             if (self.futures) |futures| return futures;
 
             const futures = try allocator.create([recv_window_size]FutureEntry);
-            futures.* = [_]FutureEntry{.{}} ** recv_window_size;
+            futures.* = @as([recv_window_size]FutureEntry, @splat(.{}));
             self.futures = futures;
             return futures;
         }
@@ -439,7 +439,7 @@ pub fn ReliableUnorderedRecvState(comptime window_size: usize) type {
 
         initialized: bool = false,
         newest_seq: u16 = 0,
-        seen: [window_size]?u16 = [_]?u16{null} ** window_size,
+        seen: [window_size]?u16 = @splat(null),
 
         pub fn classify(self: *Self, seq: u16) ReliableUnorderedRecvAction {
             if (!self.initialized) {
