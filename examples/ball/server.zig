@@ -1,12 +1,12 @@
 const std = @import("std");
-const zenet = @import("zenet");
+const zanoza = @import("zanoza");
 const proto = @import("protocol");
 
 // TransportServer(opts, void) — `void` selects the built-in UDP socket.
-const Srv = zenet.TransportServer(proto.net_opts, void);
+const Srv = zanoza.TransportServer(proto.net_opts, void);
 
 const Slot = struct {
-    cid: ?u64 = null, // zenet client ID, stable for the lifetime of the connection
+    cid: ?u64 = null, // zanoza client ID, stable for the lifetime of the connection
     x: f32 = proto.W / 2,
     y: f32 = proto.H / 2,
 };
@@ -23,12 +23,12 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
 
-    const bind: zenet.Address = .{ .ip4 = .unspecified(proto.SERVER_PORT) };
+    const bind: zanoza.Address = .{ .ip4 = .unspecified(proto.SERVER_PORT) };
 
     // ServerConfig: protocol_id, handshake_timeout_ns, client_timeout_ns,
     //   public_addresses, secure, challenge_key, secret_key.
     // secure=false accepts plain (unauthenticated) connections.
-    const config = zenet.ServerConfig.init(
+    const config = zanoza.ServerConfig.init(
         proto.PROTOCOL_ID,
         10 * std.time.ns_per_s,
         30 * std.time.ns_per_s,

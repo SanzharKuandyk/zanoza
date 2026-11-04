@@ -1,19 +1,19 @@
 const std = @import("std");
-const zenet = @import("zenet");
+const zanoza = @import("zanoza");
 
-const opts: zenet.Options = .{
+const opts: zanoza.Options = .{
     .max_clients = 64,
     .user_data_size = 256,
     .max_payload_size = 512,
 };
 
-const Srv = zenet.TransportServer(opts, void);
+const Srv = zanoza.TransportServer(opts, void);
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
     const challenge_key: [32]u8 = @splat(0);
-    const cfg = zenet.ServerConfig.init(
+    const cfg = zanoza.ServerConfig.init(
         1,
         5000,
         10000,
@@ -23,7 +23,7 @@ pub fn main() !void {
         null,
     );
 
-    const bind = try zenet.Address.parseIp4("0.0.0.0", 9000);
+    const bind = try zanoza.Address.parseIp4("0.0.0.0", 9000);
     var srv = try Srv.init(allocator, cfg, bind);
     defer srv.deinit();
 

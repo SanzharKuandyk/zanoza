@@ -23,7 +23,7 @@ const Address = @import("../root.zig").Address;
 pub const RecvResult = @import("socket.zig").RecvResult;
 
 /// Maximum packet bytes that fit in a single loopback queue entry.
-/// 4096 is far above any realistic zenet packet for testing purposes.
+/// 4096 is far above any realistic zanoza packet for testing purposes.
 const MAX_PACKET: usize = 4096;
 
 /// How many packets each direction can buffer before dropping.

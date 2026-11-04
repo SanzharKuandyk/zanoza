@@ -1,10 +1,10 @@
 const std = @import("std");
-const zenet = @import("zenet");
+const zanoza = @import("zanoza");
 
-// zenet.Options is a comptime struct shared by TransportServer and TransportClient.
+// zanoza.Options is a comptime struct shared by TransportServer and TransportClient.
 // Both sides must use the exact same value — it controls wire format, queue sizes,
 // and which channels exist. Mismatching options means packets can't be parsed.
-pub const net_opts: zenet.Options = .{
+pub const net_opts: zanoza.Options = .{
     .max_clients = 4,
     .max_payload_size = 512,
     .user_data_size = 64,
@@ -46,7 +46,7 @@ pub const PADDLE_MARGIN: f32 = 30;
 pub const MAX_SCORE: u8 = 11;
 
 // First byte of every message payload identifies its type.
-// zenet has no built-in message typing — this is application-level framing on top of
+// zanoza has no built-in message typing — this is application-level framing on top of
 // the raw byte slice exposed by peekMessage/pollMessage.
 pub const TAG_BALL_STATE: u8 = 0x01;  // server → clients, ch 0
 pub const TAG_PADDLE_STATE: u8 = 0x10; // server → clients, ch 1
@@ -58,7 +58,7 @@ pub const TAG_NEW_GAME: u8 = 0x42;     // server → clients, ch 2; clears game-
 pub const TAG_CHAT: u8 = 0x50;         // both directions, ch 4
 
 // Floats are encoded as little-endian u32 bit patterns to avoid alignment-cast UB.
-// zenet delivers payloads as []u8 slices with no alignment guarantee, so @ptrCast
+// zanoza delivers payloads as []u8 slices with no alignment guarantee, so @ptrCast
 // to a float pointer would be undefined behaviour on some targets.
 fn writeF32(buf: []u8, v: f32) void {
     std.mem.writeInt(u32, buf[0..4], @bitCast(v), .little);

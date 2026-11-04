@@ -1,12 +1,14 @@
-# zenet
+# zanoza
 
+> [!NOTE]
+> Changed name of the package (previously zenet) because too many packages
+> have similar names (for example: [zenet](https://codeberg.org/Pivok/zenet])), besides when you see name like that you expect it to be
+> ENet binding or something related).
 
 > **Ai assisted** — Well state machines and some transport was written by me, other parts were later done by ai with my view on things (I reviewed and tested). 
 Originally was developing just to get a grasp on how architecture works(Though i do not mean that current architecture is correct one).
 
 > **Experimental** — API is unstable and subject to change.
-
-> **Not an ENet binding.** If you are looking for Zig bindings to the ENet C library, see [znet](https://github.com/connellr023/znet).
 
 Connection-oriented game networking library for Zig. Provides a
 challenge-response handshake (HMAC-SHA256) and a channel system on top of
@@ -67,10 +69,10 @@ Controls: `W`/`S` to move · `T` to chat · `Space` to ready up after a round
 ## Quick start
 
 ```zig
-const zenet = @import("zenet");
+const zanoza = @import("zanoza");
 const std   = @import("std");
 
-const opts: zenet.Options = .{
+const opts: zanoza.Options = .{
     .max_clients      = 64,
     .max_payload_size = 512,
     .channels         = &.{
@@ -83,9 +85,9 @@ const opts: zenet.Options = .{
 
 // --- server ---
 
-const Srv = zenet.TransportServer(opts, void); // void = built-in UDP
+const Srv = zanoza.TransportServer(opts, void); // void = built-in UDP
 
-var srv = try Srv.init(allocator, zenet.ServerConfig.init(
+var srv = try Srv.init(allocator, zanoza.ServerConfig.init(
     1,                          // protocol_id
     5  * std.time.ns_per_s,     // handshake_alive_ns
     30 * std.time.ns_per_s,     // client_timeout_ns
@@ -93,7 +95,7 @@ var srv = try Srv.init(allocator, zenet.ServerConfig.init(
     false,                      // secure
     @as([32]u8, @splat(0)),                  // challenge key
     null,                       // secret key (secure mode only)
-), try zenet.Address.parseIp4("0.0.0.0", 9000));
+), try zanoza.Address.parseIp4("0.0.0.0", 9000));
 defer srv.deinit();
 
 // game loop
@@ -117,11 +119,11 @@ while (running) {
 
 // --- client ---
 
-const Cli = zenet.TransportClient(opts, void);
+const Cli = zanoza.TransportClient(opts, void);
 
 var cli = try Cli.init(
     .{ .protocol_id = 1, .server_addr = server_addr },
-    try zenet.Address.parseIp4("0.0.0.0", 0),
+    try zanoza.Address.parseIp4("0.0.0.0", 0),
 );
 defer cli.deinit();
 
@@ -154,7 +156,7 @@ while (running) {
 Both sides must use the **same** `Options` value — the wire format depends on it.
 
 ```zig
-const opts: zenet.Options = .{
+const opts: zanoza.Options = .{
     // Connection limits
     .max_clients          = 1024,  // max simultaneous connected clients
     .max_pending_clients  = null,  // defaults to max_clients * 2; must be power of 2
@@ -272,7 +274,7 @@ receiver reassembles them and delivers the complete message to `peekMessage` /
 `consumeMessage`.
 
 ```zig
-const opts: zenet.Options = .{
+const opts: zanoza.Options = .{
     .max_payload_size = 256,
     .channels = &.{
         // fragment_size=200: each fragment carries 200 bytes of user data
@@ -306,7 +308,7 @@ Pass `void` as the second type argument to use the built-in UDP socket.
 ### TransportServer
 
 ```zig
-const Srv = zenet.TransportServer(opts, void);
+const Srv = zanoza.TransportServer(opts, void);
 
 // init
 var srv = try Srv.init(allocator, server_config, bind_address);
@@ -320,7 +322,7 @@ while (srv.pollEvent()) |ev| {
     switch (ev) {
         .ClientConnected => |e| {
             // e.cid       : u64           — stable slot index, 0-based
-            // e.addr      : zenet.Address
+            // e.addr      : zanoza.Address
             // e.user_data : ?[opts.user_data_size]u8  (null if plain connect)
         },
         .ClientDisconnected => |e| {
@@ -354,7 +356,7 @@ try sm.sendPayload(cid, payload_body);
 ### TransportClient
 
 ```zig
-const Cli = zenet.TransportClient(opts, void);
+const Cli = zanoza.TransportClient(opts, void);
 
 var cli = try Cli.init(client_config, bind_address);
 defer cli.deinit();
@@ -392,11 +394,11 @@ cli.disconnect(); // graceful
 ### ServerConfig
 
 ```zig
-const cfg = zenet.ServerConfig.init(
+const cfg = zanoza.ServerConfig.init(
     protocol_id,          // u32  — must match client
     handshake_alive_ns,   // u64  — ns; pending handshake lifetime
     client_timeout_ns,    // u64  — ns; idle disconnect threshold
-    public_addresses,     // []const zenet.Address  (secure mode)
+    public_addresses,     // []const zanoza.Address  (secure mode)
     secure,               // bool — require signed ConnectToken
     challenge_key,        // [32]u8
     secret_key,           // ?[32]u8  (required when secure = true)
@@ -406,7 +408,7 @@ const cfg = zenet.ServerConfig.init(
 ### ClientConfig
 
 ```zig
-const cfg: zenet.ClientConfig = .{
+const cfg: zanoza.ClientConfig = .{
     .protocol_id        = 1,
     .server_addr        = server_address,
     .connect_timeout_ns = 5  * std.time.ns_per_s,  // ns
@@ -426,7 +428,7 @@ is wrong:
 ```zig
 const MySocket = struct {
     // Called by TransportServer/Client.init to bind the socket.
-    pub fn open(addr: zenet.Address) !MySocket { ... }
+    pub fn open(addr: zanoza.Address) !MySocket { ... }
 
     // Called by deinit.
     pub fn close(self: *MySocket) void { ... }
@@ -434,26 +436,26 @@ const MySocket = struct {
     // Non-blocking receive.  Return null when no datagram is available.
     // The returned struct must have exactly these two fields with these types.
     pub fn recvfrom(self: *MySocket, buf: []u8) ?struct {
-        addr: zenet.Address,
+        addr: zanoza.Address,
         len:  usize,
     } { ... }
 
     // Fire-and-forget send.
-    pub fn sendto(self: *MySocket, addr: zenet.Address, data: []const u8) void { ... }
+    pub fn sendto(self: *MySocket, addr: zanoza.Address, data: []const u8) void { ... }
 };
 
-const Srv = zenet.TransportServer(opts, MySocket);
+const Srv = zanoza.TransportServer(opts, MySocket);
 ```
 
 What the compiler checks (examples of the errors you get when wrong):
 
 ```
-Socket missing: pub fn open(zenet.Address) !MySocket
-Socket.open parameter must be zenet.Address, got u16
+Socket missing: pub fn open(zanoza.Address) !MySocket
+Socket.open parameter must be zanoza.Address, got u16
 Socket.open error-union payload must be MySocket, got void
 Socket.close must return void, got u32
 Socket.recvfrom must return an optional (?RecvResult)
-Socket.recvfrom result .addr must be zenet.Address
+Socket.recvfrom result .addr must be zanoza.Address
 Socket.sendto third parameter must be []const u8, got []u8
 ```
 
@@ -462,10 +464,10 @@ expose `initWithSocket` for use-cases where you construct the socket yourself
 (e.g. in tests):
 
 ```zig
-var srv = try zenet.TransportServer(opts, MySocket)
+var srv = try zanoza.TransportServer(opts, MySocket)
     .initWithSocket(allocator, server_config, my_socket_value);
 
-var cli = try zenet.TransportClient(opts, MySocket)
+var cli = try zanoza.TransportClient(opts, MySocket)
     .initWithSocket(client_config, my_socket_value);
 ```
 
@@ -480,13 +482,13 @@ to carry a signed token issued by a trusted matchmaking server.
 
 ```zig
 // matchmaking server — has the secret key
-const token = try zenet.handshake.DefaultConnectToken(
+const token = try zanoza.handshake.DefaultConnectToken(
     opts.user_data_size,
     opts.max_token_addresses,
 ).create(
     client_id,
     expires_at,       // absolute ns timestamp
-    public_addresses, // []const zenet.Address
+    public_addresses, // []const zanoza.Address
     user_data,        // [opts.user_data_size]u8
     &secret_key,
 );
@@ -518,7 +520,7 @@ const MyToken = struct {
 
     pub fn authorizeAddress(
         self: *const MyToken,
-        addr: zenet.Address,
+        addr: zanoza.Address,
     ) bool { ... }
 };
 ```
@@ -529,20 +531,20 @@ Errors emitted when the interface is wrong:
 ConnectToken must have: pub const wire_size: usize
 ConnectToken must have: pub fn encode(*const @This(), *[wire_size]u8) void
 ConnectToken must have: pub fn decode(*const [wire_size]u8) ?@This()
-ConnectToken must have: pub fn authorizeAddress(*const @This(), zenet.Address) bool
+ConnectToken must have: pub fn authorizeAddress(*const @This(), zanoza.Address) bool
 ```
 
 ---
 
 ## Raw state machines
 
-`zenet.Server` and `zenet.Client` are socket-agnostic state machines — drive
+`zanoza.Server` and `zanoza.Client` are socket-agnostic state machines — drive
 the socket yourself if you need full control over when packets are sent.
 
 ### Server
 
 ```zig
-const Srv = zenet.Server(opts);
+const Srv = zanoza.Server(opts);
 
 var srv = try Srv.init(allocator, config);
 defer srv.deinit();
@@ -556,7 +558,7 @@ try srv.handlePacket(source_addr, datagram_bytes);
 // drain outgoing — zero-copy peek/consume pattern
 while (srv.peekOutgoing()) |out| {
     // out : *const Outgoing — points into the ring buffer
-    // out.addr   : zenet.Address
+    // out.addr   : zanoza.Address
     // out.packet : Packet(opts)
     udp_send(out.addr, out.packet);
     srv.consumeOutgoing();
@@ -601,7 +603,7 @@ out.packet.Payload.len = body_len;
 ### Client
 
 ```zig
-const Cli = zenet.Client(opts);
+const Cli = zanoza.Client(opts);
 
 var cli = try Cli.init(.{ .protocol_id = 1, .server_addr = server_addr });
 
@@ -650,23 +652,23 @@ cli.disconnect();
 
 ## Testing with LoopbackSocket
 
-`zenet.LoopbackSocket` is an in-memory socket backed by two fixed-size queues.
+`zanoza.LoopbackSocket` is an in-memory socket backed by two fixed-size queues.
 Create a `Pair`, get the two socket endpoints from it, and pass them to
 `initWithSocket` — no OS network stack involved.
 
 ```zig
-const LoopbackSocket = zenet.LoopbackSocket;
+const LoopbackSocket = zanoza.LoopbackSocket;
 
 var pair: LoopbackSocket.Pair = .{};
 
-const srv_addr = try zenet.Address.parseIp4("127.0.0.1", 9000);
-const cli_addr = try zenet.Address.parseIp4("127.0.0.1", 9001);
+const srv_addr = try zanoza.Address.parseIp4("127.0.0.1", 9000);
+const cli_addr = try zanoza.Address.parseIp4("127.0.0.1", 9001);
 
-var srv = try zenet.TransportServer(opts, LoopbackSocket)
+var srv = try zanoza.TransportServer(opts, LoopbackSocket)
     .initWithSocket(allocator, server_config, pair.serverSocket(srv_addr));
 defer srv.deinit();
 
-var cli = try zenet.TransportClient(opts, LoopbackSocket)
+var cli = try zanoza.TransportClient(opts, LoopbackSocket)
     .initWithSocket(client_config, pair.clientSocket(cli_addr));
 defer cli.deinit();
 

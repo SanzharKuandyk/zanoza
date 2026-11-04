@@ -24,7 +24,7 @@ pub const Options = struct {
     max_token_addresses: usize = 8,
     user_data_size: usize = 256,
     max_payload_size: usize = 1024,
-    /// User-provided ConnectToken type. `void` = use zenet's built-in default.
+    /// User-provided ConnectToken type. `void` = use zanoza's built-in default.
     ConnectToken: type = void,
     /// Per-channel configuration. Index = channel_id. At least one channel required.
     /// Use `ChannelConfig{ .kind = .ReliableOrdered, .reliable_buffer = 32, ... }`.

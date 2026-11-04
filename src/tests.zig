@@ -1,8 +1,8 @@
-/// Integration tests for zenet server/client state machines and channel logic.
+/// Integration tests for zanoza server/client state machines and channel logic.
 /// These tests exercise the state machines directly — no sockets required.
 const std = @import("std");
 const testing = std.testing;
-const zenet = @import("root.zig");
+const zanoza = @import("root.zig");
 const packet_mod = @import("packet.zig");
 const channel_mod = @import("channel.zig");
 const LoopbackSocket = @import("transport/loopback.zig").LoopbackSocket;
@@ -15,7 +15,7 @@ comptime {
     _ = @import("ring_buffer.zig");
 }
 
-const opts: zenet.Options = .{
+const opts: zanoza.Options = .{
     .max_clients = 4,
     .max_pending_clients = 8,
     .nonce_window = 8,
@@ -32,8 +32,8 @@ const opts: zenet.Options = .{
     .reliable_resend_ns = 100 * std.time.ns_per_ms,
 };
 
-const Srv = zenet.Server(opts);
-const Cli = zenet.Client(opts);
+const Srv = zanoza.Server(opts);
+const Cli = zanoza.Client(opts);
 const Pkt = packet_mod.Packet(opts);
 
 fn sleepNs(ns: u64) !void {
@@ -42,21 +42,21 @@ fn sleepNs(ns: u64) !void {
     try std.Io.sleep(io_threaded.io(), .fromNanoseconds(@intCast(ns)), .awake);
 }
 
-fn testAddr(port: u16) zenet.Address {
+fn testAddr(port: u16) zanoza.Address {
     return .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } };
 }
 
-fn serverCfg() zenet.ServerConfig {
-    return zenet.ServerConfig.init(1, 5000, 10000, &.{}, false, @as([32]u8, @splat(0)), null);
+fn serverCfg() zanoza.ServerConfig {
+    return zanoza.ServerConfig.init(1, 5000, 10000, &.{}, false, @as([32]u8, @splat(0)), null);
 }
 
-fn clientCfg(port: u16) zenet.ClientConfig {
+fn clientCfg(port: u16) zanoza.ClientConfig {
     return .{ .protocol_id = 1, .server_addr = testAddr(port) };
 }
 
 /// Relay all outgoing packets from `src` to `dst.handlePacket`.
 /// `src_addr` is the address dst will see as the sender.
-fn relayClientToServer(cli: *Cli, srv: *Srv, client_addr: zenet.Address) !void {
+fn relayClientToServer(cli: *Cli, srv: *Srv, client_addr: zanoza.Address) !void {
     var buf: [packet_mod.maxPacketSize(opts)]u8 = undefined;
     while (cli.pollOutgoing()) |out| {
         const len = try packet_mod.serialize(opts, out.packet, buf[0..]);
@@ -147,7 +147,7 @@ test "server disconnects idle client on timeout" {
     const timeout_ns = 1 * std.time.ns_per_ms;
     var srv = try Srv.init(
         testing.allocator,
-        zenet.ServerConfig.init(1, 5000, timeout_ns, &.{}, false, @as([32]u8, @splat(0)), null),
+        zanoza.ServerConfig.init(1, 5000, timeout_ns, &.{}, false, @as([32]u8, @splat(0)), null),
     );
     defer srv.deinit();
 
@@ -353,9 +353,9 @@ test "reliable channel state stores and acks data" {
 }
 
 test "default connect token wire round-trip and address authorization" {
-    const Token = zenet.handshake.DefaultConnectToken(opts.user_data_size, opts.max_token_addresses);
+    const Token = zanoza.handshake.DefaultConnectToken(opts.user_data_size, opts.max_token_addresses);
 
-    const secret_key: [zenet.SECRET_KEY_SIZE]u8 = @splat(7);
+    const secret_key: [zanoza.SECRET_KEY_SIZE]u8 = @splat(7);
     const allowed_addr = testAddr(41000);
     const denied_addr = testAddr(41001);
     const user_data: [opts.user_data_size]u8 = @splat(0x5A);
@@ -379,16 +379,16 @@ const TSrv = TransportServer(opts, LoopbackSocket);
 const TCli = TransportClient(opts, LoopbackSocket);
 
 /// Addresses used as fake local endpoints for loopback sockets.
-const srv_addr: zenet.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 20000 } };
-const cli_addr: zenet.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 20001 } };
+const srv_addr: zanoza.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 20000 } };
+const cli_addr: zanoza.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 20001 } };
 
 /// Server config suitable for transport-layer tests that run tick() with real time.
-fn transportServerCfg() zenet.ServerConfig {
+fn transportServerCfg() zanoza.ServerConfig {
     const ns_per_s = std.time.ns_per_s;
-    return zenet.ServerConfig.init(1, 5 * ns_per_s, 30 * ns_per_s, &.{}, false, @as([32]u8, @splat(0)), null);
+    return zanoza.ServerConfig.init(1, 5 * ns_per_s, 30 * ns_per_s, &.{}, false, @as([32]u8, @splat(0)), null);
 }
 
-fn loopbackClientCfg() zenet.ClientConfig {
+fn loopbackClientCfg() zanoza.ClientConfig {
     const ns_per_s = std.time.ns_per_s;
     return .{
         .protocol_id = 1,
@@ -649,7 +649,7 @@ test "transport loopback: reliable retransmit after lost ack does not redeliver"
 // Fragmentation
 // ---------------------------------------------------------------------------
 
-const frag_opts: zenet.Options = .{
+const frag_opts: zanoza.Options = .{
     .max_clients = 4,
     .max_pending_clients = 8,
     .nonce_window = 8,
@@ -671,14 +671,14 @@ test "transport loopback: fragmented ReliableOrdered channel assembles correctly
     const FSrv = TransportServer(frag_opts, LoopbackSocket);
     const FCli = TransportClient(frag_opts, LoopbackSocket);
 
-    const faddr_srv: zenet.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 21000 } };
-    const faddr_cli: zenet.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 21001 } };
+    const faddr_srv: zanoza.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 21000 } };
+    const faddr_cli: zanoza.Address = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 21001 } };
 
     var fpair: LoopbackSocket.Pair = .{};
 
     var fsrv = try FSrv.initWithSocket(
         testing.allocator,
-        zenet.ServerConfig.init(1, 5 * std.time.ns_per_s, 30 * std.time.ns_per_s, &.{}, false, @as([32]u8, @splat(0)), null),
+        zanoza.ServerConfig.init(1, 5 * std.time.ns_per_s, 30 * std.time.ns_per_s, &.{}, false, @as([32]u8, @splat(0)), null),
         fpair.serverSocket(faddr_srv),
     );
     defer fsrv.deinit();

@@ -1,10 +1,10 @@
 .{
-    .name = .zenet_examples,
+    .name = .zanoza_examples,
     .version = "0.0.0",
-    .fingerprint = 0x56642551e00b9ce2,
+    .fingerprint = 0x98307627acdb107f,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
-        .zenet = .{
+        .zanoza = .{
             .path = "..",
         },
         .raylib_zig = .{

@@ -1,19 +1,19 @@
 const std = @import("std");
-const zenet = @import("zenet");
+const zanoza = @import("zanoza");
 const proto = @import("protocol");
 
 // TransportServer(opts, void) — the second argument is the socket type.
 // `void` selects the built-in non-blocking UDP socket. A custom type satisfying
 // the socket interface (open/close/recvfrom/sendto) can be passed instead.
-const Srv = zenet.TransportServer(proto.net_opts, void);
+const Srv = zanoza.TransportServer(proto.net_opts, void);
 
-// zenet has no server-side connection timeout for established clients.
+// zanoza has no server-side connection timeout for established clients.
 // We track the last received input per slot and evict slots that go silent,
 // which handles clients that are killed without sending a Disconnect packet.
 const HEARTBEAT_TIMEOUT_MS: i64 = 10_000;
 
 const PlayerSlot = struct {
-    cid: ?u64 = null, // zenet client ID assigned by the server state machine
+    cid: ?u64 = null, // zanoza client ID assigned by the server state machine
     y: f32 = proto.SCREEN_H / 2 - proto.PADDLE_H / 2,
     dir: i8 = 0,
     last_heartbeat_ms: i64 = 0, // 0 = grace period (just connected, no input yet)
@@ -41,13 +41,13 @@ pub fn main() !void {
     var io_threaded: std.Io.Threaded = .init(alloc, .{});
     defer io_threaded.deinit();
 
-    const bind: zenet.Address = .{ .ip4 = .unspecified(proto.SERVER_PORT) };
+    const bind: zanoza.Address = .{ .ip4 = .unspecified(proto.SERVER_PORT) };
 
     // ServerConfig.init(protocol_id, handshake_alive_ns, client_timeout_ns,
     //   public_addresses, secure, challenge_key, secret_key)
     // `secure = false` means plain (unauthenticated) connections are accepted.
     // `secret_key = null` because secure mode is off.
-    const config = zenet.ServerConfig.init(
+    const config = zanoza.ServerConfig.init(
         proto.PROTOCOL_ID,
         10 * std.time.ns_per_s,
         30 * std.time.ns_per_s,

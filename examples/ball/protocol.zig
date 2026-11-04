@@ -1,9 +1,9 @@
 const std = @import("std");
-const zenet = @import("zenet");
+const zanoza = @import("zanoza");
 
-// zenet.Options is a comptime struct; both sides must use the exact same value.
+// zanoza.Options is a comptime struct; both sides must use the exact same value.
 // It controls wire format, queue sizes, and which channels exist.
-pub const net_opts: zenet.Options = .{
+pub const net_opts: zanoza.Options = .{
     .max_clients = 4,
     .max_payload_size = 256,
     .user_data_size = 0,
@@ -42,7 +42,7 @@ pub const TAG_CHAT:   u8 = 0x20; // both directions: chat text
 pub const MAX_CHAT: usize = 128;
 
 // Floats encoded as little-endian u32 bit patterns — avoids alignment-cast UB
-// since zenet delivers payloads as []u8 with no alignment guarantee.
+// since zanoza delivers payloads as []u8 with no alignment guarantee.
 fn writeF32(buf: []u8, v: f32) void { std.mem.writeInt(u32, buf[0..4], @bitCast(v), .little); }
 fn readF32(buf: []const u8) f32 { return @bitCast(std.mem.readInt(u32, buf[0..4], .little)); }
 

@@ -4,11 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const zenet_dep = b.dependency("zenet", .{
+    const zanoza_dep = b.dependency("zanoza", .{
         .target = target,
         .optimize = optimize,
     });
-    const zenet = zenet_dep.module("zenet");
+    const zanoza = zanoza_dep.module("zanoza");
 
     const raylib_dep = b.dependency("raylib_zig", .{
         .target = target,
@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "zenet", .module = zenet },
+            .{ .name = "zanoza", .module = zanoza },
         },
     });
 
@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zenet", .module = zenet },
+                .{ .name = "zanoza", .module = zanoza },
                 .{ .name = "protocol", .module = pong_protocol },
             },
         }),
@@ -52,7 +52,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zenet", .module = zenet },
+                .{ .name = "zanoza", .module = zanoza },
                 .{ .name = "protocol", .module = pong_protocol },
                 .{ .name = "raylib", .module = raylib },
             },
@@ -73,7 +73,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "zenet", .module = zenet },
+            .{ .name = "zanoza", .module = zanoza },
         },
     });
 
@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zenet", .module = zenet },
+                .{ .name = "zanoza", .module = zanoza },
                 .{ .name = "protocol", .module = ball_protocol },
             },
         }),
@@ -103,7 +103,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zenet", .module = zenet },
+                .{ .name = "zanoza", .module = zanoza },
                 .{ .name = "protocol", .module = ball_protocol },
                 .{ .name = "raylib", .module = raylib },
             },

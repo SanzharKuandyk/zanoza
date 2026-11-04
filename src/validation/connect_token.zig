@@ -68,7 +68,7 @@ pub fn validate(comptime T: type, comptime user_data_size: usize) void {
     }
 
     if (!@hasDecl(T, "authorizeAddress"))
-        @compileError("ConnectToken must have: pub fn authorizeAddress(*const @This(), zenet.Address) bool");
+        @compileError("ConnectToken must have: pub fn authorizeAddress(*const @This(), zanoza.Address) bool");
     switch (@typeInfo(@TypeOf(T.authorizeAddress))) {
         .@"fn" => |fi| {
             if (fi.params.len != 2)
@@ -76,9 +76,9 @@ pub fn validate(comptime T: type, comptime user_data_size: usize) void {
             const p0 = fi.params[0].type orelse @compileError("ConnectToken.authorizeAddress param[0] must be *const @This()");
             if (p0 != *const T)
                 @compileError("ConnectToken.authorizeAddress param[0] must be *const @This(), got " ++ @typeName(p0));
-            const p1 = fi.params[1].type orelse @compileError("ConnectToken.authorizeAddress param[1] must be zenet.Address");
+            const p1 = fi.params[1].type orelse @compileError("ConnectToken.authorizeAddress param[1] must be zanoza.Address");
             if (p1 != root.Address)
-                @compileError("ConnectToken.authorizeAddress param[1] must be zenet.Address, got " ++ @typeName(p1));
+                @compileError("ConnectToken.authorizeAddress param[1] must be zanoza.Address, got " ++ @typeName(p1));
             const ret = fi.return_type orelse @compileError("ConnectToken.authorizeAddress must return bool");
             if (ret != bool)
                 @compileError("ConnectToken.authorizeAddress must return bool, got " ++ @typeName(ret));

@@ -1,11 +1,11 @@
 const std = @import("std");
 const rl = @import("raylib");
-const zenet = @import("zenet");
+const zanoza = @import("zanoza");
 const proto = @import("protocol");
 
 // TransportClient(opts, void) — `void` selects the built-in UDP socket.
 // opts must be identical to what the server was compiled with.
-const Cli = zenet.TransportClient(proto.net_opts, void);
+const Cli = zanoza.TransportClient(proto.net_opts, void);
 
 const W = @as(i32, @intFromFloat(proto.W));
 const H = @as(i32, @intFromFloat(proto.H));
@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
         if (args.next()) |s| server_ip = parseIp4(s) orelse .{ 127, 0, 0, 1 };
     }
 
-    const config: zenet.ClientConfig = .{
+    const config: zanoza.ClientConfig = .{
         .protocol_id = proto.PROTOCOL_ID,
         .server_addr = .{ .ip4 = .{ .bytes = server_ip, .port = proto.SERVER_PORT } },
         // How long to wait for the handshake before giving up.
@@ -63,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
     // few ticks and fires a Connected event when done.
     try cli.connect();
 
-    rl.initWindow(W, H, "Zenet Ball");
+    rl.initWindow(W, H, "Zanoza Ball");
     defer rl.closeWindow();
     rl.setTargetFPS(60);
 
