@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > Changed name of the package (previously zenet) because too many packages
-> have similar names (for example: [zenet](https://codeberg.org/Pivok/zenet])), besides when you see name like that you expect it to be
+> have similar names (for example: [zenet](https://codeberg.org/Pivok/zenet)), besides when you see name like that you expect it to be
 > ENet binding or something related).
 
 > **Ai assisted** — Well state machines and some transport was written by me, other parts were later done by ai with my view on things (I reviewed and tested). 
