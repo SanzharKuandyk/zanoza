@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
                 .Connected => {
                     connected = true;
                     my_id = null;
-                    balls = @splat(.{}); // clear peer state for the new session
+                    balls = @as([4]Ball, @splat(.{})); // clear peer state for the new session
                     appendChat("Connected!");
                 },
                 .Disconnected => {

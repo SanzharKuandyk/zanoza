@@ -93,7 +93,7 @@ var srv = try Srv.init(allocator, zanoza.ServerConfig.init(
     30 * std.time.ns_per_s,     // client_timeout_ns
     &.{},                       // public addresses (secure mode only)
     false,                      // secure
-    @as([32]u8, @splat(0)),                  // challenge key
+    @as([32]u8, @splat(0)),     // challenge key
     null,                       // secret key (secure mode only)
 ), try zanoza.Address.parseIp4("0.0.0.0", 9000));
 defer srv.deinit();
