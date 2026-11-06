@@ -349,7 +349,11 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             const data_len = @min(data.len, max_user_data);
             const body_len = channel_mod.HEADER_SIZE + data_len;
 
-            // For reliable channels, push to retransmit buffer first (may fail with BufferFull).
+            // For reliable channels, have to reserve the payload slot and
+            // check if retransmit buffer have space
+            // TODO: rewrite this func, need different abstraction
+            var send_state_ptr: ?*RelState = null;
+
             var seq: u16 = 0;
             switch (Layout.kind(channel_id)) {
                 .Unreliable => {},
@@ -361,20 +365,30 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
                     seq = st.send_seq;
                 },
                 .ReliableOrdered => {
-                    const send = self.orderedSendState(channel_id) orelse return error.InvalidChannel;
-                    seq = send.push(data[0..data_len], now_ns) orelse
+                    const send: *RelState = self.orderedSendState(channel_id) orelse return error.InvalidChannel;
+                    if (send.isNextNotEmpty())
                         return error.ReliableBufferFull;
+
+                    send_state_ptr = send;
                 },
                 .ReliableUnordered => {
-                    const send = self.unorderedSendState(channel_id) orelse return error.InvalidChannel;
-                    seq = send.push(data[0..data_len], now_ns) orelse
+                    const send: *RelState = self.unorderedSendState(channel_id) orelse return error.InvalidChannel;
+                    if (send.isNextNotEmpty())
                         return error.ReliableBufferFull;
+
+                    send_state_ptr = send;
                 },
             }
 
             // Write header + user data directly into the outgoing slot (no intermediate buffer).
             const out = try self.cli.reservePayloadSlot();
             const body = &out.packet.Payload.body;
+
+            // So reserving payload slot is successfull, and it's reliable channel, so push to retransmit buffer first
+            if (send_state_ptr) |send| {
+                seq = send.push(data[0..data_len], now_ns) orelse unreachable;
+            }
+
             channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, seq);
             @memcpy(body[channel_mod.HEADER_SIZE..body_len], data[0..data_len]);
             out.packet.Payload.len = @intCast(body_len);

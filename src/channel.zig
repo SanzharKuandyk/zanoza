@@ -274,6 +274,12 @@ pub fn ReliableState(comptime buf_size: usize, comptime data_cap: usize) type {
         send_seq: u16 = 0,
         entries: [buf_size]Entry = @splat(.{}),
 
+        pub fn isNextNotEmpty(self: *const Self) bool {
+            const next_seq = self.send_seq +% 1;
+            const idx = @as(usize, next_seq) % buf_size;
+            return self.entries[idx].active;
+        }
+
         /// Enqueue a message for reliable delivery. Returns the assigned sequence number,
         /// or null if the send buffer is full (the slot for the next seq is still unACKed).
         pub fn push(self: *Self, data: []const u8, now: u64) ?u16 {
