@@ -26,6 +26,7 @@ pub fn Server(comptime opts: Options) type {
     const Conn = connection_mod.Connection(opts);
     const PendingConn = connection_mod.PendingConnection(opts);
     const Pkt = packet_mod.Packet(opts);
+    const PayloadHeader = packet_mod.PayloadHeader;
     const Pool = PayloadPool(opts.messages_queue_size, opts.max_payload_size);
 
     return struct {
@@ -46,6 +47,7 @@ pub fn Server(comptime opts: Options) type {
         };
 
         pub const RawMessageView = struct {
+            header: PayloadHeader,
             cid: u64,
             payload: Pool.Ref,
         };
@@ -356,8 +358,8 @@ pub fn Server(comptime opts: Options) type {
                     const conn = &self.clients[slot].?;
                     conn.last_recv = self.getCurrentTime();
                     // Single copy: wire buffer -> pool.
-                    const ref = self.payload_pool.allocCopy(buffer[packet_mod.PAYLOAD_HEADER_SIZE .. packet_mod.PAYLOAD_HEADER_SIZE + payload.len]) orelse return error.IoError;
-                    if (!self.messages.pushBack(.{ .cid = conn.cid, .payload = ref })) {
+                    const ref = self.payload_pool.allocCopy(buffer[payload.header.wireSize()..][0..payload.len]) orelse return error.IoError;
+                    if (!self.messages.pushBack(.{ .cid = conn.cid, .header = payload.header, .payload = ref })) {
                         self.payload_pool.release(ref);
                         return error.IoError;
                     }

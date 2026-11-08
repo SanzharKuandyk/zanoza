@@ -1,6 +1,5 @@
 const std = @import("std");
 const root = @import("../root.zig");
-const channel_mod = @import("../channel.zig");
 
 fn requirePowerOfTwo(comptime name: []const u8, comptime value: usize) void {
     if (value == 0 or (value & (value - 1)) != 0)
@@ -32,17 +31,16 @@ pub fn validate(comptime opts: root.Options) void {
                 @compileError("Options.max_token_addresses must fit in u8");
         }
 
-        if (opts.max_payload_size < @import("../channel.zig").HEADER_SIZE)
-            @compileError("Options.max_payload_size must be at least channel.HEADER_SIZE");
+        if (opts.max_payload_size == 0)
+            @compileError("Options.max_payload_size must be greater than zero");
         // Payload packets encode length in a u16 on the wire.
         if (opts.max_payload_size > std.math.maxInt(u16))
             @compileError("Options.max_payload_size must fit in the packet u16 length field");
 
         if (opts.channels.len == 0)
             @compileError("Options.channels must have at least one entry");
-        // One bit in the channel byte is reserved for ACK packets.
         if (opts.channels.len > 128)
-            @compileError("Options.channels supports at most 128 entries because channel ids share a byte with the ACK flag");
+            @compileError("Options.channels supports at most 128 entries");
 
         for (opts.channels) |ch| {
             switch (ch.kind) {
@@ -57,8 +55,8 @@ pub fn validate(comptime opts: root.Options) void {
                     @compileError("UnreliableLatest channels do not support fragmentation; use Unreliable instead");
                 if (frag_sz == 0)
                     @compileError("ChannelConfig.fragment_size must be greater than zero");
-                if (channel_mod.FRAG_HEADER_SIZE + frag_sz > opts.max_payload_size)
-                    @compileError("ChannelConfig.fragment_size + FRAG_HEADER_SIZE exceeds max_payload_size");
+                if (frag_sz > opts.max_payload_size)
+                    @compileError("ChannelConfig.fragment_size exceeds max_payload_size");
             }
         }
     }

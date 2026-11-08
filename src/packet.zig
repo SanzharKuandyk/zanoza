@@ -11,9 +11,8 @@ const validation = @import("validation/root.zig");
 const Options = root.Options;
 
 pub const ChallengeToken = handshake.ChallengeToken;
+
 pub const PROTOCOL_VERSION: u8 = 1;
-/// Byte offset where the payload body begins: [ver:1][kind:1][len:2].
-pub const PAYLOAD_HEADER_SIZE: usize = 4;
 
 // Wire format:
 //   byte 0   = protocol version
@@ -26,8 +25,51 @@ pub const PAYLOAD_HEADER_SIZE: usize = 4;
 //   Challenge               = [ver:u8][kind:u8][sequence:u64][expires_at:u64][token:16]
 //   ConnectionResponse      = [ver:u8][kind:u8][sequence:u64][token:16]
 //   ConnectionAccepted      = [ver:u8][kind:u8]
-//   Payload                 = [ver:u8][kind:u8][len:u16][body:len]
+//   Payload                 = [ver:u8][kind:u8][flags:u8][channel:u8][seq:u16][len:u16][fragment?][body:len]
+//   fragment                = [msg_id:u16][count:u8][index:u8][total_size:u16]
 //   Disconnect              = [ver:u8][kind:u8]
+//
+// Sizes below count serialized bytes: u8 = 1, u16 = 2, u32 = 4, u64 = 8.
+
+/// ver (1) + kind (1).
+pub const PACKET_HEADER_SIZE: usize = 1 + 1;
+/// Common header + protocol_id (4) + client_nonce (8). Secure requests append their token.
+pub const CONNECTION_REQUEST_HEADER_SIZE: usize = PACKET_HEADER_SIZE + 4 + 8;
+/// Common header + sequence (8) + expires_at (8) + challenge token (16).
+pub const CHALLENGE_PACKET_SIZE: usize = PACKET_HEADER_SIZE + 8 + 8 + @sizeOf(ChallengeToken);
+/// Common header + sequence (8) + challenge token (16).
+pub const CONNECTION_RESPONSE_PACKET_SIZE: usize = PACKET_HEADER_SIZE + 8 + @sizeOf(ChallengeToken);
+
+/// Common header + flags (1) + channel (1) + seq (2) + len (2).
+pub const PAYLOAD_HEADER_SIZE: usize = PACKET_HEADER_SIZE + 1 + 1 + 2 + 2;
+/// msg_id (2) + count (1) + index (1) + total_size (2).
+pub const FRAGMENT_HEADER_SIZE: usize = 2 + 1 + 1 + 2;
+/// Payload header followed by fragment metadata, before the user-data bytes.
+pub const FRAGMENTED_PAYLOAD_HEADER_SIZE: usize = PAYLOAD_HEADER_SIZE + FRAGMENT_HEADER_SIZE;
+
+const ACK_FLAG: u8 = 1;
+const FRAGMENT_FLAG: u8 = 2;
+
+/// Delivery metadata serialized ahead of the user-data bytes.
+pub const PayloadHeader = struct {
+    channel_id: u8 = 0,
+    seq: u16 = 0,
+    is_ack: bool = false,
+    fragment: ?FragmentHeader = null,
+
+    pub fn wireSize(self: PayloadHeader) usize {
+        return if (self.fragment != null) FRAGMENTED_PAYLOAD_HEADER_SIZE else PAYLOAD_HEADER_SIZE;
+    }
+};
+
+/// Describes one fragment of a complete user message.
+pub const FragmentHeader = struct {
+    msg_id: u16,
+    frag_count: u8,
+    frag_index: u8,
+    total_size: u16,
+};
+
 pub const PacketKind = enum(u8) {
     ConnectionRequestPlain = 1,
     ConnectionRequestSecure = 2,
@@ -58,138 +100,159 @@ pub fn Packet(comptime opts: Options) type {
     };
 }
 
+pub const SerializeError = error{ BufferTooSmall, PayloadTooLarge, InvalidPacket };
+pub const DeserializeError = error{ InvalidPacket, UnsupportedVersion };
+
 pub fn maxPacketSize(comptime opts: Options) usize {
     comptime validation.options.validate(opts);
-
-    const token_wire_size = TokenType(opts).wire_size;
-    // Worst-case packet is the secure connection request because the token size
-    // is user-configurable, but payload packets cap out at max_payload_size.
     return @max(
-        14 + token_wire_size,
-        @max(34, @max(26, 4 + opts.max_payload_size)),
+        CONNECTION_REQUEST_HEADER_SIZE + TokenType(opts).wire_size,
+        CHALLENGE_PACKET_SIZE,
+        CONNECTION_RESPONSE_PACKET_SIZE,
+        FRAGMENTED_PAYLOAD_HEADER_SIZE + opts.max_payload_size,
     );
 }
 
-pub fn serialize(comptime opts: Options, p: Packet(opts), out: []u8) error{ BufferTooSmall, PayloadTooLarge }!usize {
-    comptime validation.options.validate(opts);
-
+pub fn serialize(comptime opts: Options, packet: Packet(opts), out: []u8) SerializeError!usize {
     if (out.len < maxPacketSize(opts)) return error.BufferTooSmall;
+    var writer = std.Io.Writer.fixed(out);
+    writePacket(opts, packet, &writer) catch |err| switch (err) {
+        error.WriteFailed => return error.BufferTooSmall,
+        error.InvalidPacket => return error.InvalidPacket,
+        error.PayloadTooLarge => return error.PayloadTooLarge,
+    };
+    return writer.buffered().len;
+}
 
-    out[0] = PROTOCOL_VERSION;
-    switch (p) {
-        .ConnectionRequest => |req| switch (req) {
+fn writePacket(comptime opts: Options, packet: Packet(opts), writer: *std.Io.Writer) (error{ PayloadTooLarge, InvalidPacket } || std.Io.Writer.Error)!void {
+    try writer.writeByte(PROTOCOL_VERSION);
+    switch (packet) {
+        .ConnectionRequest => |request| switch (request) {
             .Plain => |plain| {
-                out[1] = @intFromEnum(PacketKind.ConnectionRequestPlain);
-                std.mem.writeInt(u32, out[2..6], plain.protocol_id, .big);
-                std.mem.writeInt(u64, out[6..14], plain.client_nonce, .big);
-                return 14;
+                try writer.writeByte(@backingInt(PacketKind.ConnectionRequestPlain));
+                try writer.writeInt(u32, plain.protocol_id, .big);
+                try writer.writeInt(u64, plain.client_nonce, .big);
             },
             .Secure => |secure| {
-                const Token = TokenType(opts);
-                out[1] = @intFromEnum(PacketKind.ConnectionRequestSecure);
-                std.mem.writeInt(u32, out[2..6], secure.protocol_id, .big);
-                std.mem.writeInt(u64, out[6..14], secure.client_nonce, .big);
-                const token_out: *[Token.wire_size]u8 = @ptrCast(out[14 .. 14 + Token.wire_size]);
-                secure.token.encode(token_out);
-                return 14 + Token.wire_size;
+                try writer.writeByte(@backingInt(PacketKind.ConnectionRequestSecure));
+                try writer.writeInt(u32, secure.protocol_id, .big);
+                try writer.writeInt(u64, secure.client_nonce, .big);
+                const token_bytes: *[TokenType(opts).wire_size]u8 = @ptrCast(try writer.writableSlice(TokenType(opts).wire_size));
+                secure.token.encode(token_bytes);
             },
         },
         .Challenge => |challenge| {
-            out[1] = @intFromEnum(PacketKind.Challenge);
-            std.mem.writeInt(u64, out[2..10], challenge.sequence, .big);
-            std.mem.writeInt(u64, out[10..18], challenge.expires_at, .big);
-            @memcpy(out[18..34], challenge.token[0..]);
-            return 34;
+            try writer.writeByte(@backingInt(PacketKind.Challenge));
+            try writer.writeInt(u64, challenge.sequence, .big);
+            try writer.writeInt(u64, challenge.expires_at, .big);
+            try writer.writeAll(&challenge.token);
         },
-        .ConnectionResponse => |resp| {
-            out[1] = @intFromEnum(PacketKind.ConnectionResponse);
-            std.mem.writeInt(u64, out[2..10], resp.sequence, .big);
-            @memcpy(out[10..26], resp.token[0..]);
-            return 26;
+        .ConnectionResponse => |response| {
+            try writer.writeByte(@backingInt(PacketKind.ConnectionResponse));
+            try writer.writeInt(u64, response.sequence, .big);
+            try writer.writeAll(&response.token);
         },
-        .ConnectionAccepted => {
-            out[1] = @intFromEnum(PacketKind.ConnectionAccepted);
-            return 2;
-        },
+        .ConnectionAccepted => try writer.writeByte(@backingInt(PacketKind.ConnectionAccepted)),
+        .Disconnect => try writer.writeByte(@backingInt(PacketKind.Disconnect)),
         .Payload => |payload| {
-            if (payload.len > opts.max_payload_size) return error.PayloadTooLarge;
-            out[1] = @intFromEnum(PacketKind.Payload);
-            std.mem.writeInt(u16, out[2..4], payload.len, .big);
-            @memcpy(out[4 .. 4 + payload.len], payload.body[0..payload.len]);
-            return 4 + payload.len;
-        },
-        .Disconnect => {
-            out[1] = @intFromEnum(PacketKind.Disconnect);
-            return 2;
+            try validatePayload(opts, payload.header, payload.len);
+
+            var flags: u8 = 0;
+            if (payload.header.is_ack) flags |= ACK_FLAG;
+            if (payload.header.fragment != null) flags |= FRAGMENT_FLAG;
+
+            try writer.writeByte(@backingInt(PacketKind.Payload));
+            try writer.writeByte(flags);
+            try writer.writeByte(payload.header.channel_id);
+            try writer.writeInt(u16, payload.header.seq, .big);
+            try writer.writeInt(u16, payload.len, .big);
+            if (payload.header.fragment) |fragment| {
+                try writer.writeInt(u16, fragment.msg_id, .big);
+                try writer.writeByte(fragment.frag_count);
+                try writer.writeByte(fragment.frag_index);
+                try writer.writeInt(u16, fragment.total_size, .big);
+            }
+            try writer.writeAll(payload.body[0..payload.len]);
         },
     }
 }
 
-pub fn deserialize(comptime opts: Options, bytes: []const u8) error{ InvalidPacket, UnsupportedVersion }!Packet(opts) {
-    comptime validation.options.validate(opts);
-
-    if (bytes.len < 2) return error.InvalidPacket;
-    if (bytes[0] != PROTOCOL_VERSION) return error.UnsupportedVersion;
-
-    const kind = std.enums.fromInt(PacketKind, bytes[1]) orelse return error.InvalidPacket;
-    switch (kind) {
-        .ConnectionRequestPlain => {
-            if (bytes.len != 14) return error.InvalidPacket;
-            return .{ .ConnectionRequest = .{ .Plain = .{
-                .protocol_id = std.mem.readInt(u32, bytes[2..6], .big),
-                .client_nonce = std.mem.readInt(u64, bytes[6..14], .big),
-            } } };
-        },
-        .ConnectionRequestSecure => {
-            const Token = TokenType(opts);
-            if (bytes.len != 14 + Token.wire_size) return error.InvalidPacket;
-            const token_bytes: *const [Token.wire_size]u8 = @ptrCast(bytes[14 .. 14 + Token.wire_size]);
-            const token = Token.decode(token_bytes) orelse return error.InvalidPacket;
-            return .{ .ConnectionRequest = .{ .Secure = .{
-                .protocol_id = std.mem.readInt(u32, bytes[2..6], .big),
-                .client_nonce = std.mem.readInt(u64, bytes[6..14], .big),
-                .token = token,
-            } } };
-        },
-        .Challenge => {
-            if (bytes.len != 34) return error.InvalidPacket;
-            var token: ChallengeToken = undefined;
-            @memcpy(token[0..], bytes[18..34]);
-            return .{ .Challenge = .{
-                .sequence = std.mem.readInt(u64, bytes[2..10], .big),
-                .expires_at = std.mem.readInt(u64, bytes[10..18], .big),
-                .token = token,
-            } };
-        },
-        .ConnectionResponse => {
-            if (bytes.len != 26) return error.InvalidPacket;
-            var token: ChallengeToken = undefined;
-            @memcpy(token[0..], bytes[10..26]);
-            return .{ .ConnectionResponse = .{
-                .sequence = std.mem.readInt(u64, bytes[2..10], .big),
-                .token = token,
-            } };
-        },
-        .ConnectionAccepted => {
-            if (bytes.len != 2) return error.InvalidPacket;
-            return .ConnectionAccepted;
-        },
-        .Payload => {
-            if (bytes.len < 4) return error.InvalidPacket;
-            const len = std.mem.readInt(u16, bytes[2..4], .big);
-            if (len > opts.max_payload_size) return error.InvalidPacket;
-            if (bytes.len != 4 + len) return error.InvalidPacket;
-
-            // Body left undefined -- callers use the original wire buffer directly.
-            return .{ .Payload = .{ .len = len, .body = undefined } };
-        },
-        .Disconnect => {
-            if (bytes.len != 2) return error.InvalidPacket;
-            return .Disconnect;
-        },
-    }
+pub fn deserialize(comptime opts: Options, bytes: []const u8) DeserializeError!Packet(opts) {
+    if (bytes.len < PACKET_HEADER_SIZE) return error.InvalidPacket;
+    var reader = std.Io.Reader.fixed(bytes);
+    const packet = readPacket(opts, &reader) catch |err| switch (err) {
+        error.EndOfStream, error.ReadFailed => return error.InvalidPacket,
+        error.InvalidPacket => return error.InvalidPacket,
+        error.UnsupportedVersion => return error.UnsupportedVersion,
+    };
+    if (reader.seek != bytes.len) return error.InvalidPacket;
+    return packet;
 }
 
+fn readPacket(comptime opts: Options, reader: *std.Io.Reader) (DeserializeError || std.Io.Reader.Error)!Packet(opts) {
+    if (try reader.takeByte() != PROTOCOL_VERSION) return error.UnsupportedVersion;
+    const kind = std.enums.fromInt(PacketKind, try reader.takeByte()) orelse return error.InvalidPacket;
+    return switch (kind) {
+        .ConnectionRequestPlain => .{ .ConnectionRequest = .{ .Plain = .{
+            .protocol_id = try reader.takeInt(u32, .big),
+            .client_nonce = try reader.takeInt(u64, .big),
+        } } },
+        .ConnectionRequestSecure => blk: {
+            const protocol_id = try reader.takeInt(u32, .big);
+            const client_nonce = try reader.takeInt(u64, .big);
+            const token_bytes = try reader.takeArray(TokenType(opts).wire_size);
+            const token = TokenType(opts).decode(token_bytes) orelse return error.InvalidPacket;
+            break :blk .{ .ConnectionRequest = .{ .Secure = .{
+                .protocol_id = protocol_id,
+                .client_nonce = client_nonce,
+                .token = token,
+            } } };
+        },
+        .Challenge => .{ .Challenge = .{
+            .sequence = try reader.takeInt(u64, .big),
+            .expires_at = try reader.takeInt(u64, .big),
+            .token = (try reader.takeArray(@sizeOf(ChallengeToken))).*,
+        } },
+        .ConnectionResponse => .{ .ConnectionResponse = .{
+            .sequence = try reader.takeInt(u64, .big),
+            .token = (try reader.takeArray(@sizeOf(ChallengeToken))).*,
+        } },
+        .ConnectionAccepted => .ConnectionAccepted,
+        .Disconnect => .Disconnect,
+        .Payload => blk: {
+            const flags = try reader.takeByte();
+            if (flags & ~(ACK_FLAG | FRAGMENT_FLAG) != 0) return error.InvalidPacket;
+
+            var header: PayloadHeader = .{
+                .channel_id = try reader.takeByte(),
+                .seq = try reader.takeInt(u16, .big),
+                .is_ack = flags & ACK_FLAG != 0,
+            };
+            const len = try reader.takeInt(u16, .big);
+            if (flags & FRAGMENT_FLAG != 0) {
+                header.fragment = .{
+                    .msg_id = try reader.takeInt(u16, .big),
+                    .frag_count = try reader.takeByte(),
+                    .frag_index = try reader.takeByte(),
+                    .total_size = try reader.takeInt(u16, .big),
+                };
+            }
+            validatePayload(opts, header, len) catch return error.InvalidPacket;
+            _ = try reader.take(len);
+            // State machines copy user bytes directly from the datagram into the pool.
+            break :blk .{ .Payload = .{ .header = header, .len = len, .body = undefined } };
+        },
+    };
+}
+
+fn validatePayload(comptime opts: Options, header: PayloadHeader, len: usize) error{ PayloadTooLarge, InvalidPacket }!void {
+    if (len > opts.max_payload_size) return error.PayloadTooLarge;
+    if (header.channel_id >= opts.channels.len) return error.InvalidPacket;
+    if (header.is_ack and (len != 0 or header.fragment != null)) return error.InvalidPacket;
+    if (header.fragment) |fragment| {
+        if (!validFragment(opts, header.channel_id, fragment, len)) return error.InvalidPacket;
+    }
+}
 pub fn ConnectionRequest(comptime opts: Options) type {
     comptime validation.options.validate(opts);
 
@@ -229,7 +292,18 @@ pub fn Payload(comptime opts: Options) type {
     comptime validation.options.validate(opts);
 
     return struct {
+        header: PayloadHeader = .{},
         len: u16,
+        /// User data only. Delivery and fragment metadata are stored in header.
         body: [opts.max_payload_size]u8,
     };
+}
+
+fn validFragment(comptime opts: Options, channel_id: u8, fragment: FragmentHeader, len: usize) bool {
+    const fragment_size = opts.channels[channel_id].fragment_size orelse return false;
+    const total_size: usize = fragment.total_size;
+    const expected_count = if (total_size == 0) 1 else (total_size - 1) / fragment_size + 1;
+    if (fragment.frag_count != expected_count or fragment.frag_index >= fragment.frag_count) return false;
+    const offset = @as(usize, fragment.frag_index) * fragment_size;
+    return offset <= total_size and len == @min(fragment_size, total_size - offset);
 }

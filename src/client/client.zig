@@ -29,6 +29,7 @@ pub fn Client(comptime opts: Options) type {
         pub const Event = enum { Connected, Disconnected };
 
         pub const RawMessageView = struct {
+            header: packet_mod.PayloadHeader,
             payload: Pool.Ref,
         };
 
@@ -163,8 +164,8 @@ pub fn Client(comptime opts: Options) type {
                     if (self.state != .Connected) return error.InvalidPacket;
                     self.last_recv = self.getCurrentTime();
                     // Single copy: wire buffer -> pool.
-                    const ref = self.payload_pool.allocCopy(buffer[packet_mod.PAYLOAD_HEADER_SIZE .. packet_mod.PAYLOAD_HEADER_SIZE + payload.len]) orelse return error.IoError;
-                    if (!self.messages.pushBack(.{ .payload = ref })) {
+                    const ref = self.payload_pool.allocCopy(buffer[payload.header.wireSize()..][0..payload.len]) orelse return error.IoError;
+                    if (!self.messages.pushBack(.{ .header = payload.header, .payload = ref })) {
                         self.payload_pool.release(ref);
                         return error.IoError;
                     }

@@ -23,6 +23,7 @@ pub const Options = struct {
     /// Must fit in a u8 because the wire format stores the count in one byte.
     max_token_addresses: usize = 8,
     user_data_size: usize = 256,
+    /// Maximum user-data bytes in one data packet. Packet headers are additional.
     max_payload_size: usize = 1024,
     /// User-provided ConnectToken type. `void` = use zanoza's built-in default.
     ConnectToken: type = void,

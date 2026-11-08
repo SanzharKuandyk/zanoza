@@ -1,11 +1,18 @@
 const std = @import("std");
 const testing = std.testing;
 
+const packet = @import("packet.zig");
+
 pub const ChannelKind = enum {
     Unreliable,
     UnreliableLatest,
     ReliableOrdered,
     ReliableUnordered,
+};
+
+pub const FragmentationPolicy = enum {
+    always,
+    when_needed,
 };
 
 /// Per-channel configuration. Use as elements of `Options.channels`.
@@ -17,24 +24,11 @@ pub const ChannelConfig = struct {
     ordered_recv_window: usize = 32,
     /// Dedup sliding window size (ReliableUnordered recv side).
     unordered_recv_window: usize = 64,
-    /// If set, this channel transparently fragments messages into chunks of at most this
-    /// many user-data bytes per fragment.  Must satisfy:
-    ///   `FRAG_HEADER_SIZE + fragment_size <= opts.max_payload_size`
+    /// Maximum user-data bytes per fragment, at most Options.max_payload_size.
     /// UnreliableLatest channels do not support fragmentation.
     fragment_size: ?usize = null,
+    fragmentation_policy: FragmentationPolicy = FragmentationPolicy.when_needed,
 };
-
-/// Bytes consumed from payload body by the channel framing layer.
-pub const HEADER_SIZE: usize = 3; // channel_id(1) + seq(2)
-
-/// Extra bytes prepended after the regular header for fragmented channels:
-///   msg_id(2) + frag_count(1) + frag_index(1) + total_size(2)
-pub const FRAG_EXTRA_SIZE: usize = 6;
-/// Total channel header size for fragmented channels.
-pub const FRAG_HEADER_SIZE: usize = HEADER_SIZE + FRAG_EXTRA_SIZE;
-
-/// High bit of channel_id byte signals an ACK-only packet.
-pub const ACK_FLAG: u8 = 0x80;
 
 pub const ChannelInfo = struct {
     config: ChannelConfig,
@@ -158,64 +152,6 @@ pub fn ChannelLayout(comptime channels: []const ChannelConfig) type {
     };
 }
 
-pub fn encodeHeader(buf: *[HEADER_SIZE]u8, channel_id: u8, seq: u16) void {
-    buf[0] = channel_id & ~ACK_FLAG;
-    std.mem.writeInt(u16, buf[1..3], seq, .big);
-}
-
-pub fn encodeAck(buf: *[HEADER_SIZE]u8, channel_id: u8, acked_seq: u16) void {
-    buf[0] = (channel_id & ~ACK_FLAG) | ACK_FLAG;
-    std.mem.writeInt(u16, buf[1..3], acked_seq, .big);
-}
-
-/// Encode the 6-byte frag-extra header that follows the regular channel header on
-/// fragmented channels.
-pub fn encodeFragExtra(
-    buf: *[FRAG_EXTRA_SIZE]u8,
-    msg_id: u16,
-    frag_count: u8,
-    frag_index: u8,
-    total_size: u16,
-) void {
-    std.mem.writeInt(u16, buf[0..2], msg_id, .big);
-    buf[2] = frag_count;
-    buf[3] = frag_index;
-    std.mem.writeInt(u16, buf[4..6], total_size, .big);
-}
-
-pub const Header = struct {
-    channel_id: u8,
-    seq: u16,
-    is_ack: bool,
-
-    pub fn decode(buf: []const u8) ?Header {
-        if (buf.len < HEADER_SIZE) return null;
-        return .{
-            .channel_id = buf[0] & ~ACK_FLAG,
-            .seq = std.mem.readInt(u16, buf[1..3], .big),
-            .is_ack = (buf[0] & ACK_FLAG) != 0,
-        };
-    }
-};
-
-/// Decoded frag-extra header (bytes 3–8 of the fragmented channel payload).
-pub const FragExtra = struct {
-    msg_id: u16,
-    frag_count: u8,
-    frag_index: u8,
-    total_size: u16,
-
-    pub fn decode(buf: []const u8) ?FragExtra {
-        if (buf.len < FRAG_EXTRA_SIZE) return null;
-        return .{
-            .msg_id = std.mem.readInt(u16, buf[0..2], .big),
-            .frag_count = buf[2],
-            .frag_index = buf[3],
-            .total_size = std.mem.readInt(u16, buf[4..6], .big),
-        };
-    }
-};
-
 /// Per-connection smoothed RTT state for adaptive retransmission.
 pub const RttState = struct {
     srtt: u64 = 0,
@@ -265,6 +201,7 @@ pub fn ReliableState(comptime buf_size: usize, comptime data_cap: usize) type {
 
         pub const Entry = struct {
             seq: u16 = 0,
+            fragment: ?packet.FragmentHeader = null,
             data: [data_cap]u8 = undefined,
             len: usize = 0,
             sent_at: u64 = 0,
@@ -273,6 +210,23 @@ pub fn ReliableState(comptime buf_size: usize, comptime data_cap: usize) type {
 
         send_seq: u16 = 0,
         entries: [buf_size]Entry = @splat(.{}),
+
+        pub fn canPush(self: *const Self, count: usize) bool {
+            if (count > buf_size or count > std.math.maxInt(u16)) return false;
+            for (1..count + 1) |offset| {
+                const seq = self.send_seq +% @as(u16, @intCast(offset));
+                const index = @as(usize, seq) % buf_size;
+                if (self.entries[index].active) return false;
+                // Wrapping the sequence can revisit an index in non-power-of-two buffers.
+                if (seq < self.send_seq) {
+                    for (1..offset) |previous| {
+                        const previous_seq = self.send_seq +% @as(u16, @intCast(previous));
+                        if (@as(usize, previous_seq) % buf_size == index) return false;
+                    }
+                }
+            }
+            return true;
+        }
 
         pub fn isNextNotEmpty(self: *const Self) bool {
             const next_seq = self.send_seq +% 1;
@@ -296,6 +250,13 @@ pub fn ReliableState(comptime buf_size: usize, comptime data_cap: usize) type {
             };
             @memcpy(self.entries[idx].data[0..copy_len], data[0..copy_len]);
             return next_seq;
+        }
+
+        /// Retain fragment metadata alongside the bytes needed for retransmission.
+        pub fn pushFragment(self: *Self, data: []const u8, now: u64, fragment: packet.FragmentHeader) ?u16 {
+            const seq = self.push(data, now) orelse return null;
+            self.entries[@as(usize, seq) % buf_size].fragment = fragment;
+            return seq;
         }
 
         /// Mark a sequence number as acknowledged; frees the slot.
@@ -337,6 +298,7 @@ pub fn ReliableOrderedRecvState(
 
         pub const FutureEntry = struct {
             seq: u16 = 0,
+            fragment: ?packet.FragmentHeader = null,
             len: usize = 0,
             active: bool = false,
             data: [max_packet_size]u8 = undefined,
@@ -350,6 +312,16 @@ pub fn ReliableOrderedRecvState(
             allocator: std.mem.Allocator,
             seq: u16,
             body: []const u8,
+        ) !ReliableOrderedRecvAction {
+            return self.receiveFragment(allocator, seq, body, null);
+        }
+
+        pub fn receiveFragment(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            seq: u16,
+            body: []const u8,
+            fragment: ?packet.FragmentHeader,
         ) !ReliableOrderedRecvAction {
             if (seq == self.next_seq) {
                 self.next_seq +%= 1;
@@ -373,6 +345,7 @@ pub fn ReliableOrderedRecvState(
                 .seq = seq,
                 .len = copy_len,
                 .active = true,
+                .fragment = fragment,
             };
             @memcpy(entry.data[0..copy_len], body[0..copy_len]);
             return .ack_only;
@@ -397,6 +370,13 @@ pub fn ReliableOrderedRecvState(
             const entry = &futures[idx];
             if (!entry.active or entry.seq != self.next_seq) return null;
             return entry.data[0..entry.len];
+        }
+
+        pub fn readyFragment(self: *Self) ?packet.FragmentHeader {
+            if (comptime recv_window_size == 0) return null;
+            _ = self.peekReady() orelse return null;
+            const futures = self.futures orelse return null;
+            return futures[@as(usize, self.next_seq) % recv_window_size].fragment;
         }
 
         pub fn consumeReady(self: *Self) void {
@@ -532,41 +512,18 @@ test "UnreliableLatestState wrapping" {
     std.debug.print("\n  PASS: UnreliableLatestState wrapping\n", .{});
 }
 
-test "Header encode/decode data" {
-    var buf: [HEADER_SIZE]u8 = undefined;
-    encodeHeader(&buf, 3, 1000);
-    const h = Header.decode(&buf).?;
-    try testing.expect(!h.is_ack);
-    try testing.expectEqual(@as(u8, 3), h.channel_id);
-    try testing.expectEqual(@as(u16, 1000), h.seq);
-    std.debug.print("\n  PASS: Header encode/decode data\n", .{});
-}
+test "ReliableState batch admission handles sequence wrap and occupied slots" {
+    var uneven: ReliableState(3, 16) = .{};
+    uneven.send_seq = 65534;
+    try testing.expect(uneven.canPush(1));
+    try testing.expect(!uneven.canPush(2));
 
-test "Header encode/decode ack" {
-    var buf: [HEADER_SIZE]u8 = undefined;
-    encodeAck(&buf, 3, 1000);
-    const h = Header.decode(&buf).?;
-    try testing.expect(h.is_ack);
-    try testing.expectEqual(@as(u8, 3), h.channel_id);
-    try testing.expectEqual(@as(u16, 1000), h.seq);
-    std.debug.print("\n  PASS: Header encode/decode ack\n", .{});
-}
-
-test "Header decode too short" {
-    const buf = [_]u8{0};
-    try testing.expect(Header.decode(&buf) == null);
-    std.debug.print("\n  PASS: Header decode too short\n", .{});
-}
-
-test "FragExtra encode/decode round-trip" {
-    var buf: [FRAG_EXTRA_SIZE]u8 = undefined;
-    encodeFragExtra(&buf, 42, 5, 3, 1000);
-    const fe = FragExtra.decode(&buf).?;
-    try testing.expectEqual(@as(u16, 42), fe.msg_id);
-    try testing.expectEqual(@as(u8, 5), fe.frag_count);
-    try testing.expectEqual(@as(u8, 3), fe.frag_index);
-    try testing.expectEqual(@as(u16, 1000), fe.total_size);
-    std.debug.print("\n  PASS: FragExtra encode/decode round-trip\n", .{});
+    var state: ReliableState(4, 16) = .{};
+    state.send_seq = 65534;
+    try testing.expect(state.canPush(4));
+    state.entries[0].active = true;
+    try testing.expect(!state.canPush(2));
+    try testing.expect(!state.canPush(5));
 }
 
 test "ReliableState push and ack" {

@@ -153,6 +153,11 @@ while (running) {
 
 ## Options
 
+The data packet header carries flags, channel ID,
+sequence number, and user-data length, followed by optional fragment metadata.
+`max_payload_size` counts user-data bytes. Ordinary headers add 8 bytes and
+fragmented headers add 14 bytes to the serialized data packet.
+
 Both sides must use the **same** `Options` value — the wire format depends on it.
 
 ```zig
@@ -162,7 +167,7 @@ const opts: zanoza.Options = .{
     .max_pending_clients  = null,  // defaults to max_clients * 2; must be power of 2
 
     // Wire format
-    .max_payload_size     = 1024,  // bytes per payload (includes channel header)
+    .max_payload_size     = 1024,  // user-data bytes per data packet (headers are additional)
     .user_data_size       = 256,   // bytes carried in ConnectToken.user_data
 
     // Channels  (index = channel_id passed to sendOnChannel)
@@ -233,6 +238,7 @@ Each channel is configured with a `ChannelConfig` struct:
 | `reliable_buffer`      | `ReliableOrdered`, `ReliableUnordered` | `64` | Unacked send slots per peer |
 | `ordered_recv_window`  | `ReliableOrdered`                 | `32`    | Future-packet buffer depth; `0` = no buffering |
 | `unordered_recv_window`| `ReliableUnordered`               | `64`    | Dedup sliding-window size |
+| `fragmentation_policy` | all except `UnreliableLatest` | `when_needed` | `always` uses fragment framing for every message |
 | `fragment_size`        | all except `UnreliableLatest`     | `null`  | Enable fragmentation; see below |
 
 ```zig
@@ -261,10 +267,13 @@ next tick.
 ### Fragmentation
 
 Set `fragment_size` on any channel (except `UnreliableLatest`) to transparently
-split messages larger than a single UDP payload. The constraint is:
+split messages larger than a single data packet. The default policy is
+`.when_needed`, which sends messages up to `max_payload_size` bytes normally.
+Use `.fragmentation_policy = .always` to use fragment framing for every message.
+The constraint is:
 
 ```
-FRAG_HEADER_SIZE (9) + fragment_size ≤ max_payload_size
+fragment_size ≤ max_payload_size
 ```
 
 Each fragment is sent as a separate packet with its own sequence number; on
@@ -278,13 +287,14 @@ const opts: zanoza.Options = .{
     .max_payload_size = 256,
     .channels = &.{
         // fragment_size=200: each fragment carries 200 bytes of user data
-        // 200 + 9 = 209 ≤ 256 ✓
+        // 200 ≤ 256; packet and fragment headers have separate storage
         // a 600-byte message becomes ceil(600/200) = 3 fragments
         .{ .kind = .ReliableOrdered, .reliable_buffer = 64, .fragment_size = 200 },
     },
 };
 
-// send — any size up to 255 × fragment_size bytes (and ≤ 65535 bytes total)
+// send — up to 255 × fragment_size bytes (and ≤ 65535 bytes total)
+// All fragments must fit the available outgoing and reliable send slots.
 try srv.sendOnChannel(cid, 0, large_bytes);
 
 // receive — messageData() returns the full assembled slice
@@ -585,7 +595,7 @@ while (srv.peekMessage()) |msg| {
     // msg.cid     : u64
     // msg.payload : Pool.Ref  — opaque handle, use payloadData() to read
     const data = srv.payloadData(msg.payload);
-    _ = data; // []const u8 — raw payload bytes (includes 3-byte channel header)
+    _ = data; // []const u8 — user-data bytes only; msg.header carries delivery metadata
     srv.releasePayload(msg.payload);
     srv.consumeMessage(); // advance ring only, does NOT release
 }
@@ -596,7 +606,8 @@ try srv.sendPayload(cid, payload_body); // payload_body: []const u8
 // zero-copy send: reserve a slot and write directly (avoids one memcpy)
 const out = try srv.reservePayloadSlot(cid);
 const body = &out.packet.Payload.body;
-// write your channel header + data into body[0..], then set the length:
+// set delivery metadata separately, write user data into body[0..], then set its length:
+out.packet.Payload.header = .{ .channel_id = 0, .seq = 1 };
 out.packet.Payload.len = body_len;
 ```
 
@@ -633,7 +644,7 @@ while (cli.peekMessage()) |msg| {
     // msg : *const RawMessageView — points into ring buffer
     // msg.payload : Pool.Ref  — opaque handle, use payloadData() to read
     const data = cli.payloadData(msg.payload);
-    _ = data; // []const u8 — raw payload bytes (includes 3-byte channel header)
+    _ = data; // []const u8 — user-data bytes only; msg.header carries delivery metadata
     cli.releasePayload(msg.payload);
     cli.consumeMessage(); // advance ring only, does NOT release
 }

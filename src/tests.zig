@@ -251,39 +251,6 @@ test "client sendPayload reaches server as message" {
 }
 
 // ---------------------------------------------------------------------------
-// Channel header helpers (used by transport layer)
-// ---------------------------------------------------------------------------
-
-test "channel header round-trip through payload body" {
-    var body: [opts.max_payload_size]u8 = @splat(0);
-
-    // Encode a channel 1, seq 42, with user data
-    channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], 1, 42);
-    const user_data = "hello";
-    @memcpy(body[channel_mod.HEADER_SIZE .. channel_mod.HEADER_SIZE + user_data.len], user_data);
-
-    const hdr = channel_mod.Header.decode(&body).?;
-    try testing.expect(!hdr.is_ack);
-    try testing.expectEqual(@as(u8, 1), hdr.channel_id);
-    try testing.expectEqual(@as(u16, 42), hdr.seq);
-    try testing.expectEqualStrings(user_data, body[channel_mod.HEADER_SIZE .. channel_mod.HEADER_SIZE + user_data.len]);
-
-    std.debug.print("\n  PASS: channel header round-trip through payload body\n", .{});
-}
-
-test "channel ACK header round-trip" {
-    var body: [opts.max_payload_size]u8 = @splat(0);
-    channel_mod.encodeAck(body[0..channel_mod.HEADER_SIZE], 2, 99);
-
-    const hdr = channel_mod.Header.decode(&body).?;
-    try testing.expect(hdr.is_ack);
-    try testing.expectEqual(@as(u8, 2), hdr.channel_id);
-    try testing.expectEqual(@as(u16, 99), hdr.seq);
-
-    std.debug.print("\n  PASS: channel ACK header round-trip\n", .{});
-}
-
-// ---------------------------------------------------------------------------
 // UnreliableLatest channel filtering via raw state machine
 // ---------------------------------------------------------------------------
 
@@ -308,14 +275,6 @@ test "UnreliableLatest drops older sequence via state machine relay" {
     // Simulate two payloads where second has lower channel seq (out-of-order)
     var state: channel_mod.UnreliableLatestState = .{};
 
-    var body1: [opts.max_payload_size]u8 = @splat(0);
-    channel_mod.encodeHeader(body1[0..channel_mod.HEADER_SIZE], 1, 10); // ch1, seq=10
-    body1[channel_mod.HEADER_SIZE] = 0xAA;
-
-    var body2: [opts.max_payload_size]u8 = @splat(0);
-    channel_mod.encodeHeader(body2[0..channel_mod.HEADER_SIZE], 1, 5); // ch1, seq=5 (older)
-    body2[channel_mod.HEADER_SIZE] = 0xBB;
-
     // seq=10 accepted
     try testing.expect(state.accept(10));
     // seq=5 rejected (older)
@@ -332,7 +291,7 @@ test "UnreliableLatest drops older sequence via state machine relay" {
 
 test "reliable channel state stores and acks data" {
     const buf_size = 8; // matches reliable_buffer in opts channels above
-    const max_ud = opts.max_payload_size - channel_mod.HEADER_SIZE;
+    const max_ud = opts.max_payload_size;
     const R = channel_mod.ReliableState(buf_size, max_ud);
     var state: R = .{};
 
@@ -657,12 +616,10 @@ const frag_opts: zanoza.Options = .{
     .events_queue_size = 32,
     .messages_queue_size = 64,
     .user_data_size = 16,
-    // max_payload_size = 64, fragment_size = 16:
-    //   9 (FRAG_HEADER_SIZE) + 16 = 25 <= 64 ✓
-    //   a 40-byte message needs ceil(40/16) = 3 fragments
+    // Header storage is additional. A 40-byte message uses three 16-byte fragments.
     .max_payload_size = 64,
     .channels = &.{
-        .{ .kind = .ReliableOrdered, .reliable_buffer = 32, .fragment_size = 16 },
+        .{ .kind = .ReliableOrdered, .reliable_buffer = 32, .fragment_size = 16, .fragmentation_policy = .always },
     },
     .reliable_resend_ns = 100 * std.time.ns_per_ms,
 };
@@ -726,5 +683,202 @@ test "transport loopback: fragmented ReliableOrdered channel assembles correctly
     fcli.consumeMessage();
     try testing.expect(fcli.peekMessage() == null);
 
+    // Always-fragmented empty messages still have one fragment and no user bytes.
+    try fcli.sendOnChannel(0, "");
+    try testing.expect(fcli.getStateMachine().peekOutgoing().?.packet.Payload.header.fragment != null);
+    for (0..4) |_| {
+        fcli.tick();
+        fsrv.tick();
+    }
+    const empty = fsrv.peekMessage() orelse return error.MissingEmptyMessage;
+    try testing.expectEqual(@as(usize, 0), fsrv.messageData(empty).len);
+    fsrv.consumeMessage();
+
     std.debug.print("\n  PASS: transport loopback: fragmented ReliableOrdered channel assembles correctly\n", .{});
+}
+
+test "packet headers carry delivery metadata and leave the full payload for user bytes" {
+    var payload: packet_mod.Payload(opts) = .{ .header = .{ .channel_id = 2, .seq = 42 }, .len = opts.max_payload_size, .body = @splat(0xa5) };
+    var wire: [packet_mod.maxPacketSize(opts)]u8 = undefined;
+    const size = try packet_mod.serialize(opts, .{ .Payload = payload }, &wire);
+    try testing.expectEqual(packet_mod.PAYLOAD_HEADER_SIZE + opts.max_payload_size, size);
+    const decoded = (try packet_mod.deserialize(opts, wire[0..size])).Payload;
+    try testing.expectEqualDeep(payload.header, decoded.header);
+    try testing.expectEqualSlices(u8, &payload.body, wire[decoded.header.wireSize()..size]);
+
+    payload.header.is_ack = true;
+    payload.len = 0;
+    const ack_size = try packet_mod.serialize(opts, .{ .Payload = payload }, &wire);
+    const ack = (try packet_mod.deserialize(opts, wire[0..ack_size])).Payload;
+    try testing.expect(ack.header.is_ack);
+    try testing.expectEqual(@as(u16, 42), ack.header.seq);
+    try testing.expectEqual(packet_mod.PAYLOAD_HEADER_SIZE, ack_size);
+
+    wire[2] |= 0x80;
+    try testing.expectError(error.InvalidPacket, packet_mod.deserialize(opts, wire[0..ack_size]));
+    wire[2] = 0;
+    wire[0] = packet_mod.PROTOCOL_VERSION +% 1;
+    try testing.expectError(error.UnsupportedVersion, packet_mod.deserialize(opts, wire[0..ack_size]));
+}
+
+test "packet decoder rejects incomplete headers and inconsistent fragment sizes" {
+    var payload: packet_mod.Payload(frag_opts) = .{
+        .header = .{ .channel_id = 0, .seq = 1, .fragment = .{ .msg_id = 3, .frag_count = 3, .frag_index = 0, .total_size = 40 } },
+        .len = 16,
+        .body = @splat(0xab),
+    };
+    var wire: [packet_mod.maxPacketSize(frag_opts)]u8 = undefined;
+    const size = try packet_mod.serialize(frag_opts, .{ .Payload = payload }, &wire);
+    const decoded = (try packet_mod.deserialize(frag_opts, wire[0..size])).Payload;
+    try testing.expectEqualDeep(payload.header, decoded.header);
+    try testing.expectEqual(packet_mod.FRAGMENTED_PAYLOAD_HEADER_SIZE + 16, size);
+    for (0..size) |truncated| {
+        try testing.expectError(error.InvalidPacket, packet_mod.deserialize(frag_opts, wire[0..truncated]));
+    }
+    // A sender cannot declare 40 bytes complete after supplying one byte.
+    payload.header.fragment = .{ .msg_id = 3, .frag_count = 1, .frag_index = 0, .total_size = 40 };
+    payload.len = 1;
+    try testing.expectError(error.InvalidPacket, packet_mod.serialize(frag_opts, .{ .Payload = payload }, &wire));
+    wire[packet_mod.PAYLOAD_HEADER_SIZE + 2] = 1;
+    try testing.expectError(error.InvalidPacket, packet_mod.deserialize(frag_opts, wire[0..size]));
+}
+
+fn connectTransports(srv: anytype, cli: anytype) !u64 {
+    try cli.connect();
+    var connected = false;
+    var cid: ?u64 = null;
+    for (0..20) |_| {
+        cli.tick();
+        srv.tick();
+        while (srv.pollEvent()) |event| {
+            if (event == .ClientConnected) cid = event.ClientConnected.cid;
+        }
+        while (cli.pollEvent()) |event| {
+            if (event == .Connected) connected = true;
+        }
+        if (connected and cid != null) return cid.?;
+    }
+    return error.HandshakeTimeout;
+}
+
+test "transport sends full payloads and mixes ordinary messages with fragments in both directions" {
+    inline for (.{ zanoza.ChannelKind.Unreliable, zanoza.ChannelKind.ReliableOrdered, zanoza.ChannelKind.ReliableUnordered }) |kind| {
+        const options: zanoza.Options = .{
+            .max_clients = 4,
+            .max_payload_size = 64,
+            .channels = &.{.{ .kind = kind, .fragment_size = 16, .reliable_buffer = 32 }},
+        };
+        const S = TransportServer(options, LoopbackSocket);
+        const C = TransportClient(options, LoopbackSocket);
+        var pair: LoopbackSocket.Pair = .{};
+        var srv = try S.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+        defer srv.deinit();
+        var cli = try C.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+        defer cli.deinit();
+        const cid = try connectTransports(&srv, &cli);
+        const data: [65]u8 = @splat(0x7b);
+        for ([_]usize{ 0, 16, 64, 65 }) |len| {
+            try srv.sendOnChannel(cid, 0, data[0..len]);
+            try cli.sendOnChannel(0, data[0..len]);
+            const sh = srv.getStateMachine().peekOutgoing().?.packet.Payload.header;
+            const ch = cli.getStateMachine().peekOutgoing().?.packet.Payload.header;
+            try testing.expectEqual(len > options.max_payload_size, sh.fragment != null);
+            try testing.expectEqual(len > options.max_payload_size, ch.fragment != null);
+            for (0..4) |_| {
+                srv.tick();
+                cli.tick();
+            }
+            const sm = srv.peekMessage() orelse return error.MissingServerMessage;
+            const cm = cli.peekMessage() orelse return error.MissingClientMessage;
+            try testing.expectEqualSlices(u8, data[0..len], srv.messageData(sm));
+            try testing.expectEqualSlices(u8, data[0..len], cli.messageData(cm));
+            srv.consumeMessage();
+            cli.consumeMessage();
+            try testing.expect(srv.peekMessage() == null and cli.peekMessage() == null);
+        }
+    }
+}
+
+test "ordered fragments retain metadata through reordering and retransmission" {
+    const S = TransportServer(frag_opts, LoopbackSocket);
+    const C = TransportClient(frag_opts, LoopbackSocket);
+    var pair: LoopbackSocket.Pair = .{};
+    var srv = try S.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+    var cli = try C.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+    const cid = try connectTransports(&srv, &cli);
+    var wire: [packet_mod.maxPacketSize(frag_opts)]u8 = undefined;
+    const data: [40]u8 = @splat(0x31);
+    try srv.sendOnChannel(cid, 0, &data);
+    const first = srv.getStateMachine().pollOutgoing().?;
+    const second = srv.getStateMachine().pollOutgoing().?;
+    const third = srv.getStateMachine().pollOutgoing().?;
+    const third_len = try packet_mod.serialize(frag_opts, third.packet, &wire);
+    try cli.getStateMachine().handlePacket(wire[0..third_len]);
+    const second_len = try packet_mod.serialize(frag_opts, second.packet, &wire);
+    try cli.getStateMachine().handlePacket(wire[0..second_len]);
+    cli.tick();
+    try testing.expect(cli.peekMessage() == null);
+    // ACK the buffered followers while the first fragment remains lost.
+    srv.tick();
+    try sleepNs(120 * std.time.ns_per_ms);
+    srv.tick();
+    cli.tick();
+    const msg = cli.peekMessage() orelse return error.MissingReassembledMessage;
+    try testing.expectEqualSlices(u8, &data, cli.messageData(msg));
+    cli.consumeMessage();
+    // Replaying the original first fragment must not redeliver the message.
+    const first_len = try packet_mod.serialize(frag_opts, first.packet, &wire);
+    try cli.getStateMachine().handlePacket(wire[0..first_len]);
+    cli.tick();
+    try testing.expect(cli.peekMessage() == null);
+}
+
+test "outgoing queue rejection leaves reliable sequences and fragmented messages uncommitted" {
+    const options: zanoza.Options = .{
+        .max_clients = 4,
+        .max_payload_size = 64,
+        .outgoing_queue_size = 4,
+        .channels = &.{
+            .{ .kind = .ReliableOrdered, .reliable_buffer = 8 },
+            .{ .kind = .ReliableOrdered, .reliable_buffer = 8, .fragment_size = 16, .fragmentation_policy = .always },
+        },
+    };
+    const S = TransportServer(options, LoopbackSocket);
+    const C = TransportClient(options, LoopbackSocket);
+    var pair: LoopbackSocket.Pair = .{};
+    var srv = try S.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+    var cli = try C.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+    const cid = try connectTransports(&srv, &cli);
+    const data: [40]u8 = @splat(0x44);
+    try cli.sendOnChannel(0, "one");
+    try cli.sendOnChannel(0, "two");
+    try testing.expectError(error.IoError, cli.sendOnChannel(1, &data));
+    try testing.expectEqual(@as(usize, 2), cli.getStateMachine().outgoing.len);
+    try cli.sendOnChannel(0, "three");
+    try cli.sendOnChannel(0, "four");
+    try testing.expectError(error.IoError, cli.sendOnChannel(0, "rejected"));
+    for (0..3) |_| {
+        cli.tick();
+        srv.tick();
+    }
+    while (srv.peekMessage() != null) srv.consumeMessage();
+    try cli.sendOnChannel(0, "retry");
+    try testing.expectEqual(@as(u16, 5), cli.getStateMachine().peekOutgoing().?.packet.Payload.header.seq);
+    for (0..3) |_| {
+        cli.tick();
+        srv.tick();
+    }
+    while (srv.peekMessage() != null) srv.consumeMessage();
+    try cli.sendOnChannel(1, &data);
+    const fragment = cli.getStateMachine().peekOutgoing().?.packet.Payload.header.fragment.?;
+    try testing.expectEqual(@as(u16, 1), fragment.msg_id);
+    try testing.expectEqual(@as(u16, 1), cli.getStateMachine().peekOutgoing().?.packet.Payload.header.seq);
+
+    const too_big: [65]u8 = @splat(0);
+    try testing.expectError(error.MessageTooLarge, srv.sendOnChannel(cid, 0, &too_big));
+    try testing.expectError(error.MessageTooLarge, cli.sendOnChannel(0, &too_big));
 }

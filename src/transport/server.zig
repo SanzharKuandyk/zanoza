@@ -20,8 +20,9 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
     }
 
     const Srv = server_mod.Server(opts);
+    const PayloadHeader = packet_mod.PayloadHeader;
     const max_packet_size = packet_mod.maxPacketSize(opts);
-    const max_user_data = opts.max_payload_size - channel_mod.HEADER_SIZE;
+    const max_user_data = opts.max_payload_size;
     const PoolRef = Srv.PayloadPool.Ref;
 
     const Layout = channel_mod.ChannelLayout(opts.channels);
@@ -260,9 +261,10 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             // Drain SM message queue (payloads from wire -> pool).
             while (self.srv.peekMessage()) |raw| {
                 const ref = raw.payload;
+                const header = raw.header;
                 const cid = raw.cid;
                 self.srv.consumeMessage();
-                self.handleIncoming(cid, ref);
+                self.handleIncoming(cid, header, ref);
             }
 
             self.retransmitReliable(now_ns);
@@ -281,21 +283,15 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             }
         }
 
-        fn handleIncoming(self: *Self, cid: u64, ref: PoolRef) void {
+        fn handleIncoming(self: *Self, cid: u64, hdr: PayloadHeader, ref: PoolRef) void {
             const body = self.srv.payloadData(ref);
             const slot: usize = @intCast(cid);
-            const hdr = channel_mod.Header.decode(body) orelse {
-                self.srv.releasePayload(ref);
-                return;
-            };
-            if (hdr.channel_id >= channel_count) {
+            const ch_idx = hdr.channel_id;
+            if (ch_idx >= channel_count) {
                 self.srv.releasePayload(ref);
                 return;
             }
-            const ch_idx = hdr.channel_id;
             const kind = Layout.kind(ch_idx);
-            const is_frag = Layout.config(ch_idx).fragment_size != null;
-
             if (hdr.is_ack) {
                 self.handleAck(slot, ch_idx, kind, hdr.seq);
                 self.srv.releasePayload(ref);
@@ -303,30 +299,15 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             }
 
             switch (kind) {
-                .Unreliable => {
-                    if (is_frag) {
-                        self.handleFragmentBytes(cid, slot, ch_idx, body);
-                        self.srv.releasePayload(ref);
-                        return;
-                    }
-                },
+                .Unreliable => {},
                 .UnreliableLatest => {
                     if (!self.acceptLatest(slot, ch_idx, hdr.seq)) {
                         self.srv.releasePayload(ref);
                         return;
                     }
-                    if (is_frag) {
-                        self.handleFragmentBytes(cid, slot, ch_idx, body);
-                        self.srv.releasePayload(ref);
-                        return;
-                    }
                 },
                 .ReliableOrdered => {
-                    if (is_frag) {
-                        self.handleReliableOrderedFrag(cid, slot, ch_idx, hdr.seq, ref);
-                    } else {
-                        self.handleReliableOrdered(cid, slot, ch_idx, hdr.seq, ref);
-                    }
+                    self.handleReliableOrdered(cid, slot, ch_idx, hdr.seq, hdr.fragment, ref);
                     return;
                 },
                 .ReliableUnordered => {
@@ -334,15 +315,15 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                         self.srv.releasePayload(ref);
                         return;
                     }
-                    if (is_frag) {
-                        self.handleFragmentBytes(cid, slot, ch_idx, body);
-                        self.srv.releasePayload(ref);
-                        return;
-                    }
                 },
             }
 
-            self.enqueueMessage(cid, @intCast(ch_idx), .{ .pooled = ref });
+            if (hdr.fragment) |fragment| {
+                self.handleFragmentBytes(cid, slot, ch_idx, fragment, body);
+                self.srv.releasePayload(ref);
+            } else {
+                self.enqueueMessage(cid, ch_idx, .{ .pooled = ref });
+            }
         }
 
         fn retransmitReliable(self: *Self, now_ns: u64) void {
@@ -372,127 +353,108 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                 if (!e.active) continue;
                 if (now_ns -| e.sent_at < rto) continue;
 
-                var body: [opts.max_payload_size]u8 = undefined;
-                const body_len = channel_mod.HEADER_SIZE + e.len;
-                channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, e.seq);
-                @memcpy(body[channel_mod.HEADER_SIZE..body_len], e.data[0..e.len]);
-                self.srv.sendPayload(cid, body[0..body_len]) catch continue;
+                const out = self.srv.reservePayloadSlot(cid) catch continue;
+                out.packet.Payload.header = .{
+                    .channel_id = channel_id,
+                    .seq = e.seq,
+                    .fragment = e.fragment,
+                };
+                @memcpy(out.packet.Payload.body[0..e.len], e.data[0..e.len]);
+                out.packet.Payload.len = @intCast(e.len);
                 e.sent_at = now_ns;
             }
         }
 
         pub fn sendOnChannel(self: *Self, cid: u64, channel_id: u8, data: []const u8) !void {
             if (channel_id >= channel_count) return error.InvalidChannel;
+            const slot = std.math.cast(usize, cid) orelse return error.UnknownClient;
+            if (slot >= opts.max_clients or self.srv.clients[slot] == null) return error.UnknownClient;
 
-            if (Layout.config(channel_id).fragment_size) |frag_sz| {
-                return self.sendFragmented(cid, channel_id, data, frag_sz);
+            const config = Layout.config(channel_id);
+            if (config.fragment_size) |fragment_size| {
+                if (config.fragmentation_policy == .always or data.len > max_user_data) {
+                    return self.sendFragmented(cid, channel_id, data, fragment_size);
+                }
             }
+            if (data.len > max_user_data) return error.MessageTooLarge;
 
-            const slot: usize = @intCast(cid);
             const now_ns = self.srv.getCurrentTime();
-            const data_len = @min(data.len, max_user_data);
-            const body_len = channel_mod.HEADER_SIZE + data_len;
-
-            // For reliable channels, have to reserve the payload slot and
-            // check if retransmit buffer have space
-            // TODO: rewrite this func, need different abstraction
             var send_state_ptr: ?*RelState = null;
-
             var seq: u16 = 0;
-            switch (Layout.kind(channel_id)) {
+
+            switch (config.kind) {
                 .Unreliable => {},
                 .UnreliableLatest => {
                     if (comptime UlCount == 0) return error.InvalidChannel;
-                    const idx = Layout.latestIndex(channel_id) orelse return error.InvalidChannel;
-                    const st = &self.ul_state[slot][idx];
-                    st.send_seq +%= 1;
-                    seq = st.send_seq;
+                    const index = Layout.latestIndex(channel_id) orelse return error.InvalidChannel;
+                    const state = &self.ul_state[slot][index];
+                    state.send_seq +%= 1;
+                    seq = state.send_seq;
                 },
                 .ReliableOrdered => {
                     const send_ptr = self.orderedSendPtr(slot, channel_id) orelse return error.InvalidChannel;
-                    const rel: *RelState = try self.getOrCreateReliableState(send_ptr);
-                    if (rel.isNextNotEmpty())
-                        return error.ReliableBufferFull;
-
-                    send_state_ptr = rel;
+                    const send = try self.getOrCreateReliableState(send_ptr);
+                    if (send.isNextNotEmpty()) return error.ReliableBufferFull;
+                    send_state_ptr = send;
                 },
                 .ReliableUnordered => {
                     const send_ptr = self.unorderedSendPtr(slot, channel_id) orelse return error.InvalidChannel;
-                    const rel: *RelState = try self.getOrCreateReliableState(send_ptr);
-                    if (rel.isNextNotEmpty())
-                        return error.ReliableBufferFull;
-
-                    send_state_ptr = rel;
+                    const send = try self.getOrCreateReliableState(send_ptr);
+                    if (send.isNextNotEmpty()) return error.ReliableBufferFull;
+                    send_state_ptr = send;
                 },
             }
 
-            // Write header + user data directly into the outgoing slot (no intermediate buffer).
-            const out = try self.srv.reservePayloadSlot(cid);
-            const body = &out.packet.Payload.body;
-
-            // So reserving payload slot is successfull, and it's reliable channel, so push to retransmit buffer first
+            // Commit the reliable entry only after reserving the outgoing slot.
+            const outgoing = try self.srv.reservePayloadSlot(cid);
             if (send_state_ptr) |send| {
-                seq = send.push(data[0..data_len], now_ns) orelse unreachable;
+                seq = send.push(data, now_ns) orelse unreachable;
             }
 
-            channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, seq);
-            @memcpy(body[channel_mod.HEADER_SIZE..body_len], data[0..data_len]);
-            out.packet.Payload.len = @intCast(body_len);
+            outgoing.packet.Payload.header = .{
+                .channel_id = channel_id,
+                .seq = seq,
+            };
+            @memcpy(outgoing.packet.Payload.body[0..data.len], data);
+            outgoing.packet.Payload.len = @intCast(data.len);
         }
 
-        fn sendFragmented(self: *Self, cid: u64, channel_id: u8, data: []const u8, frag_sz: usize) !void {
-            const slot: usize = @intCast(cid);
-            const now_ns = self.srv.getCurrentTime();
-
-            const frag_count_usize = if (data.len == 0) 1 else (data.len + frag_sz - 1) / frag_sz;
-            if (frag_count_usize > 255) return error.MessageTooLarge;
-            const frag_count: u8 = @intCast(frag_count_usize);
+        fn sendFragmented(self: *Self, cid: u64, channel_id: u8, data: []const u8, fragment_size: usize) !void {
+            const slot = std.math.cast(usize, cid) orelse return error.UnknownClient;
+            if (slot >= opts.max_clients or self.srv.clients[slot] == null) return error.UnknownClient;
             if (data.len > std.math.maxInt(u16)) return error.MessageTooLarge;
-            const total_size: u16 = @intCast(data.len);
-
-            const frag_ch = self.fragChannelPtr(slot, channel_id) orelse return error.InvalidChannel;
-            frag_ch.next_msg_id +%= 1;
-            const msg_id = frag_ch.next_msg_id;
-
-            for (0..frag_count) |fi_usize| {
-                const frag_index: u8 = @intCast(fi_usize);
-                const chunk_start = fi_usize * frag_sz;
-                const chunk_end = @min(chunk_start + frag_sz, data.len);
-                const chunk = data[chunk_start..chunk_end];
-
-                var frag_extra: [channel_mod.FRAG_EXTRA_SIZE]u8 = undefined;
-                channel_mod.encodeFragExtra(&frag_extra, msg_id, frag_count, frag_index, total_size);
-
-                switch (Layout.kind(channel_id)) {
-                    .ReliableOrdered, .ReliableUnordered => {
-                        // Push [frag_extra][chunk] to the reliable buffer so retransmit works unchanged.
-                        var entry_buf: [max_user_data]u8 = undefined;
-                        @memcpy(entry_buf[0..channel_mod.FRAG_EXTRA_SIZE], &frag_extra);
-                        @memcpy(entry_buf[channel_mod.FRAG_EXTRA_SIZE .. channel_mod.FRAG_EXTRA_SIZE + chunk.len], chunk);
-                        const entry_data = entry_buf[0 .. channel_mod.FRAG_EXTRA_SIZE + chunk.len];
-
-                        const send_ptr = switch (Layout.kind(channel_id)) {
-                            .ReliableOrdered => self.orderedSendPtr(slot, channel_id) orelse return error.InvalidChannel,
-                            else => self.unorderedSendPtr(slot, channel_id) orelse return error.InvalidChannel,
-                        };
-                        const rel = try self.getOrCreateReliableState(send_ptr);
-                        const seq = rel.push(entry_data, now_ns) orelse return error.ReliableBufferFull;
-
-                        const out = try self.srv.reservePayloadSlot(cid);
-                        const body = &out.packet.Payload.body;
-                        channel_mod.encodeHeader(body[0..channel_mod.HEADER_SIZE], channel_id, seq);
-                        @memcpy(body[channel_mod.HEADER_SIZE..channel_mod.FRAG_HEADER_SIZE], &frag_extra);
-                        @memcpy(body[channel_mod.FRAG_HEADER_SIZE .. channel_mod.FRAG_HEADER_SIZE + chunk.len], chunk);
-                        out.packet.Payload.len = @intCast(channel_mod.FRAG_HEADER_SIZE + chunk.len);
-                    },
-                    .Unreliable, .UnreliableLatest => {
-                        var frag_body: [opts.max_payload_size]u8 = undefined;
-                        channel_mod.encodeHeader(frag_body[0..channel_mod.HEADER_SIZE], channel_id, 0);
-                        @memcpy(frag_body[channel_mod.HEADER_SIZE..channel_mod.FRAG_HEADER_SIZE], &frag_extra);
-                        @memcpy(frag_body[channel_mod.FRAG_HEADER_SIZE .. channel_mod.FRAG_HEADER_SIZE + chunk.len], chunk);
-                        self.srv.sendPayload(cid, frag_body[0 .. channel_mod.FRAG_HEADER_SIZE + chunk.len]) catch {};
-                    },
+            const fragment_count = if (data.len == 0) 1 else (data.len - 1) / fragment_size + 1;
+            if (fragment_count > std.math.maxInt(u8)) return error.MessageTooLarge;
+            const fragment_state = self.fragChannelPtr(slot, channel_id) orelse return error.InvalidChannel;
+            const reliable_send = try self.reliableSendState(slot, channel_id);
+            // Admit the complete message before changing IDs, sequences, or queue lengths.
+            if (reliable_send) |send| {
+                if (!send.canPush(fragment_count)) return error.ReliableBufferFull;
+            }
+            if (fragment_count > opts.outgoing_queue_size - self.srv.outgoing.len) return error.IoError;
+            fragment_state.next_msg_id +%= 1;
+            const now_ns = self.srv.getCurrentTime();
+            for (0..fragment_count) |index| {
+                const offset = index * fragment_size;
+                const chunk = data[offset..@min(offset + fragment_size, data.len)];
+                const fragment: packet_mod.FragmentHeader = .{
+                    .msg_id = fragment_state.next_msg_id,
+                    .frag_count = @intCast(fragment_count),
+                    .frag_index = @intCast(index),
+                    .total_size = @intCast(data.len),
+                };
+                const outgoing = self.srv.reservePayloadSlot(cid) catch unreachable;
+                var seq: u16 = 0;
+                if (reliable_send) |send| {
+                    seq = send.pushFragment(chunk, now_ns, fragment) orelse unreachable;
                 }
+                outgoing.packet.Payload.header = .{
+                    .channel_id = channel_id,
+                    .seq = seq,
+                    .fragment = fragment,
+                };
+                @memcpy(outgoing.packet.Payload.body[0..chunk.len], chunk);
+                outgoing.packet.Payload.len = @intCast(chunk.len);
             }
         }
 
@@ -526,7 +488,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
 
         pub fn messageData(self: *const Self, msg: *const MessageView) []const u8 {
             return switch (msg.payload) {
-                .pooled => |ref| self.srv.payloadData(ref)[channel_mod.HEADER_SIZE..],
+                .pooled => |ref| self.srv.payloadData(ref),
                 .assembled => |data| data,
             };
         }
@@ -545,9 +507,8 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         }
 
         fn sendAck(self: *Self, cid: u64, channel_id: u8, seq: u16) void {
-            var ack_body: [channel_mod.HEADER_SIZE]u8 = undefined;
-            channel_mod.encodeAck(&ack_body, channel_id, seq);
-            self.srv.sendPayload(cid, &ack_body) catch {};
+            const out = self.srv.reservePayloadSlot(cid) catch return;
+            out.packet.Payload.header = .{ .channel_id = channel_id, .seq = seq, .is_ack = true };
         }
 
         fn handleAck(self: *Self, slot: usize, channel_id: u8, kind: channel_mod.ChannelKind, seq: u16) void {
@@ -580,6 +541,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             slot: usize,
             channel_id: u8,
             seq: u16,
+            fragment: ?packet_mod.FragmentHeader,
             ref: PoolRef,
         ) void {
             const body = self.srv.payloadData(ref);
@@ -587,87 +549,38 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                 self.srv.releasePayload(ref);
                 return;
             };
-            const action = recv.receive(self.allocator, seq, body) catch {
+            const action = recv.receiveFragment(self.allocator, seq, body, fragment) catch {
                 self.srv.releasePayload(ref);
                 return;
             };
-            switch (action) {
-                .drop => {
-                    self.srv.releasePayload(ref);
-                    return;
-                },
-                .ack_only => {
-                    self.sendAck(cid, channel_id, seq);
-                    self.srv.releasePayload(ref);
-                    return;
-                },
-                .deliver => {
-                    self.sendAck(cid, channel_id, seq);
-                    self.enqueueMessage(cid, channel_id, .{ .pooled = ref });
-
-                    // Buffered followers: allocate new pool refs from SM pool.
-                    while (recv.peekReady()) |ready_body| {
-                        const future_ref = self.srv.payload_pool.allocCopy(ready_body) orelse break;
-                        self.enqueueMessage(cid, channel_id, .{ .pooled = future_ref });
-                        recv.consumeReady();
-                    }
-                },
+            if (action == .drop) {
+                self.srv.releasePayload(ref);
+                return;
+            }
+            self.sendAck(cid, channel_id, seq);
+            if (action == .ack_only) {
+                self.srv.releasePayload(ref);
+                return;
+            }
+            if (fragment) |frag| {
+                self.handleFragmentBytes(cid, slot, channel_id, frag, body);
+                self.srv.releasePayload(ref);
+            } else {
+                self.enqueueMessage(cid, channel_id, .{ .pooled = ref });
+            }
+            while (recv.peekReady()) |ready_body| {
+                if (recv.readyFragment()) |frag| {
+                    self.handleFragmentBytes(cid, slot, channel_id, frag, ready_body);
+                } else {
+                    const future_ref = self.srv.payload_pool.allocCopy(ready_body) orelse break;
+                    self.enqueueMessage(cid, channel_id, .{ .pooled = future_ref });
+                }
+                recv.consumeReady();
             }
         }
 
-        /// Like handleReliableOrdered but feeds each delivered body to the fragment
-        /// reassembler instead of directly enqueuing it as a message.
-        fn handleReliableOrderedFrag(
-            self: *Self,
-            cid: u64,
-            slot: usize,
-            channel_id: u8,
-            seq: u16,
-            ref: PoolRef,
-        ) void {
-            const body = self.srv.payloadData(ref);
-            const recv = self.orderedRecvState(slot, channel_id) orelse {
-                self.srv.releasePayload(ref);
-                return;
-            };
-            const action = recv.receive(self.allocator, seq, body) catch {
-                self.srv.releasePayload(ref);
-                return;
-            };
-            switch (action) {
-                .drop => self.srv.releasePayload(ref),
-                .ack_only => {
-                    self.sendAck(cid, channel_id, seq);
-                    self.srv.releasePayload(ref);
-                },
-                .deliver => {
-                    self.sendAck(cid, channel_id, seq);
-                    self.handleFragmentBytes(cid, slot, channel_id, body);
-                    self.srv.releasePayload(ref);
-
-                    while (recv.peekReady()) |ready_body| {
-                        self.handleFragmentBytes(cid, slot, channel_id, ready_body);
-                        recv.consumeReady();
-                    }
-                },
-            }
-        }
-
-        fn handleFragmentBytes(
-            self: *Self,
-            cid: u64,
-            slot: usize,
-            channel_id: u8,
-            body: []const u8,
-        ) void {
-            if (body.len < channel_mod.FRAG_HEADER_SIZE) return;
-            const frag = channel_mod.FragExtra.decode(body[channel_mod.HEADER_SIZE..]) orelse return;
-            if (frag.frag_count == 0) return;
-            if (frag.frag_index >= frag.frag_count) return;
-
+        fn handleFragmentBytes(self: *Self, cid: u64, slot: usize, channel_id: u8, frag: packet_mod.FragmentHeader, chunk: []const u8) void {
             const frag_sz = Layout.config(channel_id).fragment_size orelse return;
-            const chunk = body[channel_mod.FRAG_HEADER_SIZE..];
-
             const frag_ch = self.fragChannelPtr(slot, channel_id) orelse return;
             const slot_idx = @as(usize, frag.msg_id) % FRAG_ASSEMBLY_SLOTS;
             const ab = &frag_ch.slots[slot_idx];
@@ -690,7 +603,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                 };
             }
 
-            if (frag.frag_count != ab.frag_count) return;
+            if (frag.frag_count != ab.frag_count or frag.total_size != ab.total_size) return;
             if (ab.hasFrag(frag.frag_index)) return; // duplicate
 
             ab.markFrag(frag.frag_index);
@@ -730,6 +643,15 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
                     .assembled => |data| self.allocator.free(data),
                 }
             }
+        }
+
+        fn reliableSendState(self: *Self, slot: usize, channel_id: u8) !?*RelState {
+            const state = switch (Layout.kind(channel_id)) {
+                .ReliableOrdered => self.orderedSendPtr(slot, channel_id),
+                .ReliableUnordered => self.unorderedSendPtr(slot, channel_id),
+                else => return null,
+            } orelse return error.InvalidChannel;
+            return try self.getOrCreateReliableState(state);
         }
 
         fn orderedSendPtr(self: *Self, slot: usize, channel_id: u8) ?*?*RelState {
