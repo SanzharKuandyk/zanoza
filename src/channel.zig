@@ -11,7 +11,10 @@ pub const ChannelKind = enum {
 };
 
 pub const FragmentationPolicy = enum {
+    // always fragment message even if it fits into one packet
     always,
+    // if message is bigger than packet limit and if it fits `total_size`
+    // supported by fragment type
     when_needed,
 };
 
@@ -24,10 +27,16 @@ pub const ChannelConfig = struct {
     ordered_recv_window: usize = 32,
     /// Dedup sliding window size (ReliableUnordered recv side).
     unordered_recv_window: usize = 64,
+    frag_config: ?FragConfig = null,
+};
+
+/// Fragmentation Config for channels
+/// UnreliableLatest channels do not support fragmentation.
+pub const FragConfig = struct {
+    policy: FragmentationPolicy,
     /// Maximum user-data bytes per fragment, at most Options.max_payload_size.
-    /// UnreliableLatest channels do not support fragmentation.
-    fragment_size: ?usize = null,
-    fragmentation_policy: FragmentationPolicy = FragmentationPolicy.when_needed,
+    fragment_size: usize,
+    frag_assembly_slots: usize,
 };
 
 pub const ChannelInfo = struct {
@@ -57,7 +66,7 @@ pub fn ChannelLayout(comptime channels: []const ChannelConfig) type {
         var frag_count: u8 = 0;
 
         for (channels, 0..) |ch, ch_idx| {
-            const fi: ?u8 = if (ch.fragment_size != null) fi_blk: {
+            const fi: ?u8 = if (ch.frag_config != null) fi_blk: {
                 const idx = frag_count;
                 frag_count += 1;
                 break :fi_blk idx;
@@ -145,7 +154,7 @@ pub fn ChannelLayout(comptime channels: []const ChannelConfig) type {
         }
 
         /// Returns the compact fragmentation index for `channel_id`, or null if the
-        /// channel does not have `fragment_size` set.
+        /// channel does not have `frag_config` set.
         pub fn fragIndex(channel_id: u8) ?u8 {
             return infos[channel_id].frag_index;
         }

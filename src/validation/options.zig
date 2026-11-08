@@ -50,13 +50,15 @@ pub fn validate(comptime opts: root.Options) void {
                 },
                 else => {},
             }
-            if (ch.fragment_size) |frag_sz| {
+            if (ch.frag_config) |cfg| {
+                if (cfg.frag_assembly_slots == 0)
+                    @compileError("FragConfig.frag_assembly_slots must be greater than zero");
                 if (ch.kind == .UnreliableLatest)
                     @compileError("UnreliableLatest channels do not support fragmentation; use Unreliable instead");
-                if (frag_sz == 0)
-                    @compileError("ChannelConfig.fragment_size must be greater than zero");
-                if (frag_sz > opts.max_payload_size)
-                    @compileError("ChannelConfig.fragment_size exceeds max_payload_size");
+                if (cfg.fragment_size == 0)
+                    @compileError("FragConfig.fragment_size must be greater than zero");
+                if (cfg.fragment_size > opts.max_payload_size)
+                    @compileError("FragConfig.fragment_size exceeds max_payload_size");
             }
         }
     }

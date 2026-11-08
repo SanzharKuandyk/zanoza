@@ -300,10 +300,14 @@ pub fn Payload(comptime opts: Options) type {
 }
 
 fn validFragment(comptime opts: Options, channel_id: u8, fragment: FragmentHeader, len: usize) bool {
-    const fragment_size = opts.channels[channel_id].fragment_size orelse return false;
-    const total_size: usize = fragment.total_size;
-    const expected_count = if (total_size == 0) 1 else (total_size - 1) / fragment_size + 1;
-    if (fragment.frag_count != expected_count or fragment.frag_index >= fragment.frag_count) return false;
-    const offset = @as(usize, fragment.frag_index) * fragment_size;
-    return offset <= total_size and len == @min(fragment_size, total_size - offset);
+    if (opts.channels[channel_id].frag_config) |cfg| {
+        const fragment_size = cfg.fragment_size;
+        const total_size: usize = fragment.total_size;
+        const expected_count = if (total_size == 0) 1 else (total_size - 1) / fragment_size + 1;
+        if (fragment.frag_count != expected_count or fragment.frag_index >= fragment.frag_count) return false;
+        const offset = @as(usize, fragment.frag_index) * fragment_size;
+        return offset <= total_size and len == @min(fragment_size, total_size - offset);
+    }
+
+    return false;
 }

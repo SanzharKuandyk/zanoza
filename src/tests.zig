@@ -619,7 +619,7 @@ const frag_opts: zanoza.Options = .{
     // Header storage is additional. A 40-byte message uses three 16-byte fragments.
     .max_payload_size = 64,
     .channels = &.{
-        .{ .kind = .ReliableOrdered, .reliable_buffer = 32, .fragment_size = 16, .fragmentation_policy = .always },
+        .{ .kind = .ReliableOrdered, .reliable_buffer = 32, .frag_config = .{ .fragment_size = 16, .policy = .always, .frag_assembly_slots = 8 } },
     },
     .reliable_resend_ns = 100 * std.time.ns_per_ms,
 };
@@ -766,7 +766,7 @@ test "transport sends full payloads and mixes ordinary messages with fragments i
         const options: zanoza.Options = .{
             .max_clients = 4,
             .max_payload_size = 64,
-            .channels = &.{.{ .kind = kind, .fragment_size = 16, .reliable_buffer = 32 }},
+            .channels = &.{.{ .kind = kind, .frag_config = .{ .fragment_size = 16, .policy = .when_needed, .frag_assembly_slots = 8 }, .reliable_buffer = 32 }},
         };
         const S = TransportServer(options, LoopbackSocket);
         const C = TransportClient(options, LoopbackSocket);
@@ -842,7 +842,7 @@ test "outgoing queue rejection leaves reliable sequences and fragmented messages
         .outgoing_queue_size = 4,
         .channels = &.{
             .{ .kind = .ReliableOrdered, .reliable_buffer = 8 },
-            .{ .kind = .ReliableOrdered, .reliable_buffer = 8, .fragment_size = 16, .fragmentation_policy = .always },
+            .{ .kind = .ReliableOrdered, .reliable_buffer = 8, .frag_config = .{ .fragment_size = 16, .policy = .always, .frag_assembly_slots = 8 } },
         },
     };
     const S = TransportServer(options, LoopbackSocket);
@@ -881,4 +881,192 @@ test "outgoing queue rejection leaves reliable sequences and fragmented messages
     const too_big: [65]u8 = @splat(0);
     try testing.expectError(error.MessageTooLarge, srv.sendOnChannel(cid, 0, &too_big));
     try testing.expectError(error.MessageTooLarge, cli.sendOnChannel(0, &too_big));
+}
+
+const sized_channel_opts: zanoza.Options = .{
+    .max_clients = 4,
+    .max_payload_size = 64,
+    .outgoing_queue_size = 128,
+    .channels = &.{
+        .{ .kind = .Unreliable },
+        .{ .kind = .UnreliableLatest },
+        .{
+            .kind = .ReliableOrdered,
+            .reliable_buffer = 2,
+            .ordered_recv_window = 0,
+            .frag_config = .{ .policy = .when_needed, .fragment_size = 8, .frag_assembly_slots = 1 },
+        },
+        .{
+            .kind = .ReliableOrdered,
+            .reliable_buffer = 7,
+            .ordered_recv_window = 5,
+            .frag_config = .{ .policy = .when_needed, .fragment_size = 8, .frag_assembly_slots = 3 },
+        },
+        .{ .kind = .ReliableUnordered, .reliable_buffer = 3, .unordered_recv_window = 4 },
+        .{ .kind = .ReliableUnordered, .reliable_buffer = 9, .unordered_recv_window = 13 },
+    },
+};
+
+test "channel state uses exact configured buffer, window, and assembly types" {
+    const state_mod = @import("channel_state.zig");
+    var states = state_mod.initStates(sized_channel_opts.channels, sized_channel_opts.max_payload_size, .embedded);
+    defer {
+        inline for (sized_channel_opts.channels, 0..) |_, index| states[index].deinit(testing.allocator);
+    }
+
+    try testing.expectEqual(@as(usize, 0), @sizeOf(@TypeOf(states[0])));
+    try testing.expectEqual(@as(usize, 2), states[2].send.entries.len);
+    try testing.expectEqual(@as(usize, 7), states[3].send.entries.len);
+    try testing.expectEqual(@as(usize, 3), states[4].send.entries.len);
+    try testing.expectEqual(@as(usize, 9), states[5].send.entries.len);
+    try testing.expectEqual(@as(usize, 4), states[4].recv.seen.len);
+    try testing.expectEqual(@as(usize, 13), states[5].recv.seen.len);
+    try testing.expectEqual(@as(usize, 1), states[2].fragments.slots.len);
+    try testing.expectEqual(@as(usize, 3), states[3].fragments.slots.len);
+
+    try testing.expectEqual(channel_mod.ReliableOrderedRecvAction.drop, try states[2].recv.receive(testing.allocator, 2, "future"));
+    try testing.expect(states[2].recv.futures == null);
+    try testing.expectEqual(channel_mod.ReliableOrderedRecvAction.ack_only, try states[3].recv.receive(testing.allocator, 6, "future"));
+    try testing.expectEqual(@as(usize, 5), states[3].recv.futures.?.len);
+    try testing.expectEqual(channel_mod.ReliableOrderedRecvAction.drop, try states[3].recv.receive(testing.allocator, 7, "too far"));
+
+    try testing.expectEqual(channel_mod.ReliableUnorderedRecvAction.deliver, states[4].recv.classify(10));
+    try testing.expectEqual(channel_mod.ReliableUnorderedRecvAction.stale, states[4].recv.classify(6));
+    try testing.expectEqual(channel_mod.ReliableUnorderedRecvAction.deliver, states[5].recv.classify(10));
+    try testing.expectEqual(channel_mod.ReliableUnorderedRecvAction.deliver, states[5].recv.classify(6));
+}
+
+test "each transport enforces its selected channel's reliable capacity" {
+    const S = TransportServer(sized_channel_opts, LoopbackSocket);
+    const C = TransportClient(sized_channel_opts, LoopbackSocket);
+    var pair: LoopbackSocket.Pair = .{};
+    var srv = try S.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+    var cli = try C.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+    const cid = try connectTransports(&srv, &cli);
+
+    inline for (sized_channel_opts.channels, 0..) |config, channel_id| {
+        if (config.kind == .ReliableOrdered or config.kind == .ReliableUnordered) {
+            try testing.expect(srv.channel_states[cid][channel_id].send == null);
+            for (0..config.reliable_buffer) |_| {
+                try cli.sendOnChannel(@intCast(channel_id), "data");
+                try srv.sendOnChannel(cid, @intCast(channel_id), "data");
+            }
+            try testing.expectError(error.ReliableBufferFull, cli.sendOnChannel(@intCast(channel_id), "overflow"));
+            try testing.expectError(error.ReliableBufferFull, srv.sendOnChannel(cid, @intCast(channel_id), "overflow"));
+            try testing.expectEqual(config.reliable_buffer, srv.channel_states[cid][channel_id].send.?.entries.len);
+        }
+    }
+    // The runtime dispatch also reaches channels with no reliable state.
+    try cli.sendOnChannel(0, "unreliable");
+    try cli.sendOnChannel(1, "latest");
+    try srv.sendOnChannel(cid, 0, "unreliable");
+    try srv.sendOnChannel(cid, 1, "latest");
+    try testing.expectError(error.InvalidChannel, cli.sendOnChannel(255, "invalid"));
+    try testing.expectError(error.InvalidChannel, srv.sendOnChannel(cid, 255, "invalid"));
+
+    for (0..4) |_| {
+        cli.tick();
+        srv.tick();
+    }
+    var server_counts: [sized_channel_opts.channels.len]usize = @splat(0);
+    var client_counts: [sized_channel_opts.channels.len]usize = @splat(0);
+    while (srv.peekMessage()) |message| {
+        server_counts[message.channel_id] += 1;
+        srv.consumeMessage();
+    }
+    while (cli.peekMessage()) |message| {
+        client_counts[message.channel_id] += 1;
+        cli.consumeMessage();
+    }
+    try testing.expectEqualDeep([_]usize{ 1, 1, 2, 7, 3, 9 }, server_counts);
+    try testing.expectEqualDeep(server_counts, client_counts);
+
+    inline for (sized_channel_opts.channels, 0..) |config, channel_id| {
+        if (config.kind == .ReliableOrdered or config.kind == .ReliableUnordered) {
+            try cli.sendOnChannel(@intCast(channel_id), "after ACK");
+            try srv.sendOnChannel(cid, @intCast(channel_id), "after ACK");
+        }
+    }
+    cli.disconnect();
+}
+
+test "per-channel assembly counts control interleaved messages and reset cleanup" {
+    const options: zanoza.Options = .{
+        .max_clients = 4,
+        .max_payload_size = 64,
+        .channels = &.{
+            .{ .kind = .Unreliable, .frag_config = .{ .policy = .always, .fragment_size = 8, .frag_assembly_slots = 1 } },
+            .{ .kind = .Unreliable, .frag_config = .{ .policy = .always, .fragment_size = 8, .frag_assembly_slots = 3 } },
+        },
+    };
+    const S = TransportServer(options, LoopbackSocket);
+    const C = TransportClient(options, LoopbackSocket);
+    var pair: LoopbackSocket.Pair = .{};
+    var srv = try S.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+    var cli = try C.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+    const cid = try connectTransports(&srv, &cli);
+
+    const Fragment = struct { msg_id: u16, index: u8 };
+    const fragments = [_]Fragment{
+        .{ .msg_id = 1, .index = 0 },
+        .{ .msg_id = 2, .index = 0 },
+        .{ .msg_id = 2, .index = 1 },
+        .{ .msg_id = 1, .index = 1 },
+    };
+    var wire: [packet_mod.maxPacketSize(options)]u8 = undefined;
+    for (0..options.channels.len) |channel_id| {
+        for (fragments) |fragment| {
+            const packet: packet_mod.Packet(options) = .{ .Payload = .{
+                .header = .{
+                    .channel_id = @intCast(channel_id),
+                    .fragment = .{ .msg_id = fragment.msg_id, .frag_count = 2, .frag_index = fragment.index, .total_size = 16 },
+                },
+                .len = 8,
+                .body = @splat(@intCast(fragment.msg_id)),
+            } };
+            const len = try packet_mod.serialize(options, packet, &wire);
+            try srv.getStateMachine().handlePacket(cli_addr, wire[0..len]);
+            try cli.getStateMachine().handlePacket(wire[0..len]);
+            srv.tick();
+            cli.tick();
+        }
+    }
+    var server_counts: [2]usize = @splat(0);
+    var client_counts: [2]usize = @splat(0);
+    while (srv.peekMessage()) |message| {
+        try testing.expectEqual(@as(usize, 16), srv.messageData(message).len);
+        server_counts[message.channel_id] += 1;
+        srv.consumeMessage();
+    }
+    while (cli.peekMessage()) |message| {
+        try testing.expectEqual(@as(usize, 16), cli.messageData(message).len);
+        client_counts[message.channel_id] += 1;
+        cli.consumeMessage();
+    }
+    try testing.expectEqualDeep([_]usize{ 1, 2 }, server_counts);
+    try testing.expectEqualDeep(server_counts, client_counts);
+    try testing.expect(cli.channel_states[0].fragments.slots[0].active);
+    try testing.expect(srv.channel_states[cid][0].fragments.slots[0].active);
+
+    cli.disconnect();
+    for (0..4) |_| {
+        cli.tick();
+        srv.tick();
+    }
+    try testing.expect(!srv.channel_states[cid][0].fragments.slots[0].active);
+    const reconnected_cid = try connectTransports(&srv, &cli);
+    try testing.expect(!cli.channel_states[0].fragments.slots[0].active);
+    try testing.expect(!srv.channel_states[reconnected_cid][0].fragments.slots[0].active);
+    try cli.sendOnChannel(0, "reused");
+    for (0..4) |_| {
+        cli.tick();
+        srv.tick();
+    }
+    const message = srv.peekMessage() orelse return error.MissingMessageAfterReconnect;
+    try testing.expectEqualStrings("reused", srv.messageData(message));
+    srv.consumeMessage();
 }
