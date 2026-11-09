@@ -47,6 +47,12 @@ pub const ServerError = @import("server/error.zig").ServerError;
 
 pub const TransportServer = @import("transport/server.zig").TransportServer;
 pub const TransportClient = @import("transport/client.zig").TransportClient;
+pub const TransportError = @import("transport/error.zig").TransportError;
+pub const TransportClientError = @import("transport/error.zig").TransportClientError;
+pub const TransportServerError = @import("transport/error.zig").TransportServerError;
+pub const SocketError = @import("transport/error.zig").SocketError;
+pub const PacketError = @import("packet.zig").PacketError;
+pub const HandshakeError = handshake.HandshakeError;
 pub const UdpSocket = @import("transport/udp.zig").UdpSocket;
 pub const LoopbackSocket = @import("transport/loopback.zig").LoopbackSocket;
 pub const PayloadPool = @import("payload_pool.zig").PayloadPool;

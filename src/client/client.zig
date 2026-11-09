@@ -21,6 +21,7 @@ pub fn Client(comptime opts: Options) type {
 
     return struct {
         const Self = @This();
+        pub const Error = ClientError;
 
         pub const PayloadPool = Pool;
 
@@ -58,7 +59,7 @@ pub fn Client(comptime opts: Options) type {
         messages: RingQueue(RawMessageView, opts.messages_queue_size),
         payload_pool: Pool,
 
-        pub fn init(config: ClientConfig) !Self {
+        pub fn init(config: ClientConfig) ClientError!Self {
             var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
             errdefer io_threaded.deinit();
             const now = std.Io.Timestamp.now(io_threaded.io(), .awake);

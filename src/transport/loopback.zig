@@ -71,6 +71,7 @@ const Queue = struct {
 // ---------------------------------------------------------------------------
 
 pub const LoopbackSocket = struct {
+    pub const Error = error{NotSupported};
     /// Packets this socket sends end up here (the other side's recv).
     send_queue: *Queue,
     /// Packets this socket receives come from here (the other side's send).
@@ -84,7 +85,7 @@ pub const LoopbackSocket = struct {
 
     /// Satisfies the interface signature but always returns an error.
     /// Use `Pair.serverSocket` / `Pair.clientSocket` to create connected sockets.
-    pub fn open(addr: Address) !LoopbackSocket {
+    pub fn open(addr: Address) Error!LoopbackSocket {
         _ = addr;
         return error.NotSupported;
     }

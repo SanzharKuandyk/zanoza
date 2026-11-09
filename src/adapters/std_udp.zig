@@ -1,12 +1,14 @@
 const std = @import("std");
+const SocketError = @import("../transport/error.zig").SocketError;
 const RecvResult = @import("../transport/socket.zig").RecvResult;
 const Address = @import("../root.zig").Address;
 
 pub const UdpSocket = struct {
+    pub const Error = SocketError;
     io_threaded: std.Io.Threaded,
     socket: std.Io.net.Socket,
 
-    pub fn open(addr: Address) !UdpSocket {
+    pub fn open(addr: Address) SocketError!UdpSocket {
         var io_threaded: std.Io.Threaded = .init(std.heap.page_allocator, .{});
         errdefer io_threaded.deinit();
 

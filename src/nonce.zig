@@ -24,7 +24,7 @@ pub fn RecentNonces(comptime Window: usize) type {
         }
 
         /// Returns false if nonce was already seen (replay), true if inserted.
-        pub fn insert(self: *Self, nonce: u64) !bool {
+        pub fn insert(self: *Self, nonce: u64) std.mem.Allocator.Error!bool {
             if (self.seen.contains(nonce)) return false;
 
             if (self.order.isFull()) {

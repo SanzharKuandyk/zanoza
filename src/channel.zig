@@ -321,7 +321,7 @@ pub fn ReliableOrderedRecvState(
             allocator: std.mem.Allocator,
             seq: u16,
             body: []const u8,
-        ) !ReliableOrderedRecvAction {
+        ) std.mem.Allocator.Error!ReliableOrderedRecvAction {
             return self.receiveFragment(allocator, seq, body, null);
         }
 
@@ -331,7 +331,7 @@ pub fn ReliableOrderedRecvState(
             seq: u16,
             body: []const u8,
             fragment: ?packet.FragmentHeader,
-        ) !ReliableOrderedRecvAction {
+        ) std.mem.Allocator.Error!ReliableOrderedRecvAction {
             if (seq == self.next_seq) {
                 self.next_seq +%= 1;
                 return .deliver;
@@ -406,7 +406,7 @@ pub fn ReliableOrderedRecvState(
             }
         }
 
-        fn getOrCreateFutures(self: *Self, allocator: std.mem.Allocator) !*[recv_window_size]FutureEntry {
+        fn getOrCreateFutures(self: *Self, allocator: std.mem.Allocator) std.mem.Allocator.Error!*[recv_window_size]FutureEntry {
             if (self.futures) |futures| return futures;
 
             const futures = try allocator.create([recv_window_size]FutureEntry);

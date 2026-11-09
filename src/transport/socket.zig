@@ -7,3 +7,9 @@ pub const RecvResult = struct {
     addr: @import("../root.zig").Address,
     len: usize,
 };
+
+/// Error set declared or inferred by a socket implementation's open method.
+pub fn OpenError(comptime Socket: type) type {
+    const result = @typeInfo(@TypeOf(Socket.open)).@"fn".return_type.?;
+    return @typeInfo(result).error_union.error_set;
+}

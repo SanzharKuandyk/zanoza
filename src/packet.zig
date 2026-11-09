@@ -102,6 +102,12 @@ pub fn Packet(comptime opts: Options) type {
 
 pub const SerializeError = error{ BufferTooSmall, PayloadTooLarge, InvalidPacket };
 pub const DeserializeError = error{ InvalidPacket, UnsupportedVersion };
+/// All failures encoding or decoding wire packets.
+pub const PacketError = SerializeError || DeserializeError;
+
+const PayloadError = error{ PayloadTooLarge, InvalidPacket };
+const WriteError = PayloadError || std.Io.Writer.Error;
+const ReadError = DeserializeError || std.Io.Reader.Error;
 
 pub fn maxPacketSize(comptime opts: Options) usize {
     comptime validation.options.validate(opts);
@@ -124,7 +130,7 @@ pub fn serialize(comptime opts: Options, packet: Packet(opts), out: []u8) Serial
     return writer.buffered().len;
 }
 
-fn writePacket(comptime opts: Options, packet: Packet(opts), writer: *std.Io.Writer) (error{ PayloadTooLarge, InvalidPacket } || std.Io.Writer.Error)!void {
+fn writePacket(comptime opts: Options, packet: Packet(opts), writer: *std.Io.Writer) WriteError!void {
     try writer.writeByte(PROTOCOL_VERSION);
     switch (packet) {
         .ConnectionRequest => |request| switch (request) {
@@ -189,7 +195,7 @@ pub fn deserialize(comptime opts: Options, bytes: []const u8) DeserializeError!P
     return packet;
 }
 
-fn readPacket(comptime opts: Options, reader: *std.Io.Reader) (DeserializeError || std.Io.Reader.Error)!Packet(opts) {
+fn readPacket(comptime opts: Options, reader: *std.Io.Reader) ReadError!Packet(opts) {
     if (try reader.takeByte() != PROTOCOL_VERSION) return error.UnsupportedVersion;
     const kind = std.enums.fromInt(PacketKind, try reader.takeByte()) orelse return error.InvalidPacket;
     return switch (kind) {
@@ -245,7 +251,7 @@ fn readPacket(comptime opts: Options, reader: *std.Io.Reader) (DeserializeError 
     };
 }
 
-fn validatePayload(comptime opts: Options, header: PayloadHeader, len: usize) error{ PayloadTooLarge, InvalidPacket }!void {
+fn validatePayload(comptime opts: Options, header: PayloadHeader, len: usize) PayloadError!void {
     if (len > opts.max_payload_size) return error.PayloadTooLarge;
     if (header.channel_id >= opts.channels.len) return error.InvalidPacket;
     if (header.is_ack and (len != 0 or header.fragment != null)) return error.InvalidPacket;

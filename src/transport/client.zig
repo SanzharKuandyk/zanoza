@@ -1,4 +1,5 @@
 const std = @import("std");
+const TransportClientError = @import("error.zig").TransportClientError;
 const root = @import("../root.zig");
 const validation = @import("../validation/root.zig");
 const packet_mod = @import("../packet.zig");
@@ -36,6 +37,9 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
 
     return struct {
         const Self = @This();
+        pub const Error = TransportClientError;
+        /// Constructor errors include the selected socket implementation's open errors.
+        pub const InitError = Error || socket_mod.OpenError(Socket);
 
         fn ChannelState(comptime channel_id: u8) type {
             return state_mod.ChannelState(opts.channels[channel_id], opts.max_payload_size, .embedded);
@@ -70,7 +74,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
         events: RingQueue(Event, opts.events_queue_size),
         messages: RingQueue(MessageView, opts.messages_queue_size),
 
-        pub fn init(config: root.ClientConfig, bind_addr: root.Address) !Self {
+        pub fn init(config: root.ClientConfig, bind_addr: root.Address) InitError!Self {
             const socket = try Socket.open(bind_addr);
             errdefer {
                 var s = socket;
@@ -79,7 +83,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             return initWithSocket(config, socket);
         }
 
-        pub fn initWithSocket(config: root.ClientConfig, socket: Socket) !Self {
+        pub fn initWithSocket(config: root.ClientConfig, socket: Socket) TransportClientError!Self {
             const cli = try Cli.init(config);
             return .{
                 .cli = cli,
@@ -232,14 +236,14 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             }
         }
 
-        pub fn sendOnChannel(self: *Self, channel_id: u8, data: []const u8) !void {
+        pub fn sendOnChannel(self: *Self, channel_id: u8, data: []const u8) TransportClientError!void {
             inline for (opts.channels, 0..) |_, index| {
                 if (channel_id == index) return self.sendOnConfiguredChannel(@intCast(index), data);
             }
             return error.InvalidChannel;
         }
 
-        fn sendOnConfiguredChannel(self: *Self, comptime channel_id: u8, data: []const u8) !void {
+        fn sendOnConfiguredChannel(self: *Self, comptime channel_id: u8, data: []const u8) TransportClientError!void {
             if (channel_id >= channel_count) return error.InvalidChannel;
             if (self.cli.state != .Connected) return error.InvalidState;
 
@@ -290,7 +294,7 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             outgoing.packet.Payload.len = @intCast(data.len);
         }
 
-        fn sendFragmented(self: *Self, comptime channel_id: u8, data: []const u8, fragment_size: usize) !void {
+        fn sendFragmented(self: *Self, comptime channel_id: u8, data: []const u8, fragment_size: usize) TransportClientError!void {
             if (self.cli.state != .Connected) return error.InvalidState;
 
             // would have to increase `total_size` and `frag_count` field
@@ -336,11 +340,11 @@ pub fn TransportClient(comptime opts: root.Options, comptime SocketType: type) t
             }
         }
 
-        pub fn connect(self: *Self) !void {
+        pub fn connect(self: *Self) TransportClientError!void {
             try self.cli.connect();
         }
 
-        pub fn connectSecure(self: *Self, token: ConnectTokenType) !void {
+        pub fn connectSecure(self: *Self, token: ConnectTokenType) TransportClientError!void {
             try self.cli.connectSecure(token);
         }
 

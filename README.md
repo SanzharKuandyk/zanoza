@@ -1,752 +1,469 @@
 # zanoza
 
-> [!NOTE]
-> Changed name of the package (previously zenet) because too many packages
-> have similar names (for example: [zenet](https://codeberg.org/Pivok/zenet)), besides when you see name like that you expect it to be
-> ENet binding or something related).
+Experimental UDP game networking for **Zig 0.17.0**.
 
-> **Ai assisted** — Well state machines and some transport was written by me, other parts were later done by ai with my view on things (I reviewed and tested). 
-Originally was developing just to get a grasp on how architecture works(Though i do not mean that current architecture is correct one).
+Zanoza provides connection handshakes, configurable message channels, fragmentation,
+and client/server transports. Channel buffer and assembly capacities are configured
+at comptime and stored in per-channel state types.
 
-> **Experimental** — API is unstable and subject to change.
+| Channel | Delivery |
+| --- | --- |
+| `Unreliable` | Send once |
+| `UnreliableLatest` | Deliver newer sequence numbers and discard older updates |
+| `ReliableOrdered` | Acknowledge and retransmit messages, delivering them in order |
+| `ReliableUnordered` | Acknowledge and retransmit messages, filtering duplicates |
 
-Connection-oriented game networking library for Zig. Provides a
-challenge-response handshake (HMAC-SHA256) and a channel system on top of
-unreliable UDP. Inspired by [renet](https://github.com/lucaspoffo/renet).
+The API is experimental and may change.
 
-**Requires Zig 0.17.0**
+## Try the examples
 
----
+From the repository root, run the Ball server and client in separate terminals.
 
-## Examples
+```sh
+zig build --build-file examples/build.zig ball-server
+zig build --build-file examples/build.zig ball-client
+```
 
-Two worked examples are included under `examples/`. They are built from the separate examples package so the root library package stays free of GUI/example dependencies.
+For Pong, start a server and two clients.
 
-### Ball
+```sh
+zig build --build-file examples/build.zig pong-server
+zig build --build-file examples/build.zig pong-client
+zig build --build-file examples/build.zig pong-client
+```
 
-Up to 4 clients move colored balls around a shared window. Demonstrates `ReliableOrdered` for session events, `UnreliableLatest` for ball positions, and `Unreliable` for chat.
+<details>
+<summary>Example controls and remote connections</summary>
+
+Ball supports up to four players. Move with `WASD`, open chat with `T`,
+and cancel chat with `Esc`.
 
 ![Ball example](examples/ball/balls.gif)
 
+In Pong, move with `W` / `S`, open chat with `T`, and press `Space` to ready up
+after a round. Ball listens on port 9914, and Pong listens on port 9913.
+
+Pass a server IPv4 address after `--` to connect remotely.
+
 ```sh
-zig build --build-file examples/build.zig ball-server          # terminal 1
-zig build --build-file examples/build.zig ball-client          # terminal 2
 zig build --build-file examples/build.zig ball-client -- 1.2.3.4
-```
-
-Controls: `WASD` to move · `T` to chat · `Esc` to cancel chat
-
-### Pong
-
-Two-player networked pong. Demonstrates `UnreliableLatest` for ball/paddle state and player input, `ReliableOrdered` for control events, and `Unreliable` for chat.
-
-```sh
-zig build --build-file examples/build.zig pong-server          # terminal 1
-zig build --build-file examples/build.zig pong-client          # terminal 2
-zig build --build-file examples/build.zig pong-client          # terminal 3
 zig build --build-file examples/build.zig pong-client -- 1.2.3.4
 ```
 
-Controls: `W`/`S` to move · `T` to chat · `Space` to ready up after a round
+The examples use a separate build package with their GUI dependencies.
 
----
-
-## Contents
-
-- [Quick start](#quick-start)
-- [Options](#options)
-- [Channels](#channels)
-  - [Fragmentation](#fragmentation)
-- [TransportServer / TransportClient](#transportserver--transportclient)
-- [Custom socket](#custom-socket)
-- [Secure connections / ConnectToken](#secure-connections--connecttoken)
-- [Raw state machines](#raw-state-machines)
-- [Testing with LoopbackSocket](#testing-with-loopbacksocket)
-- [Project structure](#project-structure)
-
----
+</details>
 
 ## Quick start
 
+Define a shared channel schema, then select the built-in UDP socket with `void`.
+
 ```zig
 const zanoza = @import("zanoza");
-const std   = @import("std");
 
-const opts: zanoza.Options = .{
-    .max_clients      = 64,
-    .max_payload_size = 512,
-    .channels         = &.{
-        .{ .kind = .Unreliable },
-        .{ .kind = .UnreliableLatest },
-        .{ .kind = .ReliableOrdered },
-        .{ .kind = .ReliableUnordered },
-    },
-};
-
-// --- server ---
-
-const Srv = zanoza.TransportServer(opts, void); // void = built-in UDP
-
-var srv = try Srv.init(allocator, zanoza.ServerConfig.init(
-    1,                          // protocol_id
-    5  * std.time.ns_per_s,     // handshake_alive_ns
-    30 * std.time.ns_per_s,     // client_timeout_ns
-    &.{},                       // public addresses (secure mode only)
-    false,                      // secure
-    @as([32]u8, @splat(0)),     // challenge key
-    null,                       // secret key (secure mode only)
-), try zanoza.Address.parseIp4("0.0.0.0", 9000));
-defer srv.deinit();
-
-// game loop
-while (running) {
-    srv.tick();
-
-    while (srv.pollEvent()) |ev| switch (ev) {
-        .ClientConnected    => |e| std.debug.print("connected cid={}\n",    .{e.cid}),
-        .ClientDisconnected => |e| std.debug.print("disconnected cid={}\n", .{e.cid}),
-    };
-
-    // zero-copy: pointer into the ring buffer — no data[] copy
-    while (srv.peekMessage()) |msg| {
-        const data = srv.messageData(msg);
-        std.debug.print("ch={} data={s}\n", .{ msg.channel_id, data });
-        // echo back
-        try srv.sendOnChannel(msg.cid, msg.channel_id, data);
-        srv.consumeMessage();
-    }
-}
-
-// --- client ---
-
-const Cli = zanoza.TransportClient(opts, void);
-
-var cli = try Cli.init(
-    .{ .protocol_id = 1, .server_addr = server_addr },
-    try zanoza.Address.parseIp4("0.0.0.0", 0),
-);
-defer cli.deinit();
-
-try cli.connect();
-
-while (running) {
-    cli.tick();
-
-    while (cli.pollEvent()) |ev| switch (ev) {
-        .Connected    => std.debug.print("connected\n",    .{}),
-        .Disconnected => std.debug.print("disconnected\n", .{}),
-    };
-
-    // zero-copy: pointer into the ring buffer — no data[] copy
-    while (cli.peekMessage()) |msg| {
-        std.debug.print("from server ch={} data={s}\n",
-            .{ msg.channel_id, cli.messageData(msg) });
-        cli.consumeMessage();
-    }
-
-    // send on channel 2 (ReliableOrdered)
-    try cli.sendOnChannel(2, "hello");
-}
-```
-
----
-
-## Options
-
-The data packet header carries flags, channel ID,
-sequence number, and user-data length, followed by optional fragment metadata.
-`max_payload_size` counts user-data bytes. Ordinary headers add 8 bytes and
-fragmented headers add 14 bytes to the serialized data packet.
-
-Both sides must use the **same** `Options` value — the wire format depends on it.
-
-```zig
-const opts: zanoza.Options = .{
-    // Connection limits
-    .max_clients          = 1024,  // max simultaneous connected clients
-    .max_pending_clients  = null,  // defaults to max_clients * 2; must be power of 2
-
-    // Wire format
-    .max_payload_size     = 1024,  // user-data bytes per data packet (headers are additional)
-    .user_data_size       = 256,   // bytes carried in ConnectToken.user_data
-
-    // Channels  (index = channel_id passed to sendOnChannel)
-    .channels             = &.{
-        .{ .kind = .Unreliable },
-        .{ .kind = .UnreliableLatest },
-        .{ .kind = .ReliableOrdered,   .reliable_buffer = 64, .ordered_recv_window = 32 },
-        .{ .kind = .ReliableUnordered, .reliable_buffer = 64, .unordered_recv_window = 64 },
-    },
-
-    // Global reliable timing
-    .reliable_resend_ns   = 100 * std.time.ns_per_ms,  // minimum retransmit interval (floor for RTT-based RTO)
-
-    // Queue sizes
-    .outgoing_queue_size  = 256,
-    .events_queue_size    = 256,
-    .messages_queue_size  = 256,
-    .nonce_window         = 256,   // replay-protection window
-
-    // Optional custom ConnectToken type (void = use built-in default)
-    .ConnectToken         = void,
-};
-```
-
-`reliable_resend_ns` acts as the **minimum floor** for the per-client adaptive
-retransmit timeout. The transport layers track a smoothed RTT (SRTT) per
-connection and compute `RTO = max(srtt * 2, reliable_resend_ns)`, so on low
-latency links retransmits happen sooner and on high latency links spurious
-retransmits are avoided.
-
----
-
-## Channels
-
-Every message is sent on a numbered channel (index into `opts.channels`).
-Four kinds are available:
-
-| Kind                 | Delivery         | Ordering    | Use for                            |
-|----------------------|------------------|-------------|------------------------------------|
-| `Unreliable`         | fire-and-forget  | none        | audio, debug overlays              |
-| `UnreliableLatest`   | fire-and-forget  | drops older | positions, orientations            |
-| `ReliableOrdered`    | ACK + retransmit | in order    | game events, match flow            |
-| `ReliableUnordered`  | ACK + retransmit | none        | idempotent reliable notifications  |
-
-Each channel is configured with a `ChannelConfig` struct:
-
-```zig
-.channels = &.{
-    // channel 0 — minimal unreliable
-    .{ .kind = .Unreliable },
-
-    // channel 1 — latest-only positions
-    .{ .kind = .UnreliableLatest },
-
-    // channel 2 — ordered events; deep recv window for jittery links
-    .{ .kind = .ReliableOrdered, .reliable_buffer = 32, .ordered_recv_window = 16 },
-
-    // channel 3 — bulk world state; fragmented so messages can exceed max_payload_size
-    .{ .kind = .ReliableOrdered, .reliable_buffer = 64, .fragment_size = 512 },
-},
-```
-
-`ChannelConfig` fields (all optional, shown with defaults):
-
-| Field                  | Applies to                        | Default | Description |
-|------------------------|-----------------------------------|---------|-------------|
-| `kind`                 | all                               | —       | Channel delivery kind (required) |
-| `reliable_buffer`      | `ReliableOrdered`, `ReliableUnordered` | `64` | Unacked send slots per peer |
-| `ordered_recv_window`  | `ReliableOrdered`                 | `32`    | Future-packet buffer depth; `0` = no buffering |
-| `unordered_recv_window`| `ReliableUnordered`               | `64`    | Dedup sliding-window size |
-| `fragmentation_policy` | all except `UnreliableLatest` | `when_needed` | `always` uses fragment framing for every message |
-| `fragment_size`        | all except `UnreliableLatest`     | `null`  | Enable fragmentation; see below |
-
-```zig
-// send and receive
-try cli.sendOnChannel(0, "fire-and-forget");
-try cli.sendOnChannel(1, &std.mem.toBytes(player_position));
-try cli.sendOnChannel(2, "must arrive in order");
-try cli.sendOnChannel(3, large_world_state_bytes); // fragmented transparently
-
-while (srv.peekMessage()) |msg| {
-    switch (msg.channel_id) {
-        0 => ..., // Unreliable
-        1 => ..., // UnreliableLatest — older packets already dropped
-        2 => ..., // ReliableOrdered
-        3 => ..., // assembled from fragments — messageData() returns full slice
-        else => {},
-    }
-    srv.consumeMessage();
-}
-```
-
-`sendOnChannel` returns `error.ReliableBufferFull` when all `reliable_buffer`
-slots are occupied by unACKed messages for that peer. Back off and retry on the
-next tick.
-
-### Fragmentation
-
-Set `fragment_size` on any channel (except `UnreliableLatest`) to transparently
-split messages larger than a single data packet. The default policy is
-`.when_needed`, which sends messages up to `max_payload_size` bytes normally.
-Use `.fragmentation_policy = .always` to use fragment framing for every message.
-The constraint is:
-
-```
-fragment_size ≤ max_payload_size
-```
-
-Each fragment is sent as a separate packet with its own sequence number; on
-reliable channels each fragment is individually ACKed and retransmitted. The
-receiver reassembles them and delivers the complete message to `peekMessage` /
-`messageData` — the assembled buffer is heap-allocated and freed when you call
-`consumeMessage`.
-
-```zig
-const opts: zanoza.Options = .{
+const options: zanoza.Options = .{
+    .max_clients = 4,
     .max_payload_size = 256,
     .channels = &.{
-        // fragment_size=200: each fragment carries 200 bytes of user data
-        // 200 ≤ 256; packet and fragment headers have separate storage
-        // a 600-byte message becomes ceil(600/200) = 3 fragments
-        .{ .kind = .ReliableOrdered, .reliable_buffer = 64, .fragment_size = 200 },
+        .{ .kind = .UnreliableLatest },
+        .{ .kind = .ReliableOrdered, .reliable_buffer = 16 },
     },
 };
 
-// send — up to 255 × fragment_size bytes (and ≤ 65535 bytes total)
-// All fragments must fit the available outgoing and reliable send slots.
-try srv.sendOnChannel(cid, 0, large_bytes);
+const Server = zanoza.TransportServer(options, void);
+const Client = zanoza.TransportClient(options, void);
+```
 
-// receive — messageData() returns the full assembled slice
-while (cli.peekMessage()) |msg| {
-    const data = cli.messageData(msg); // []const u8, len = original message size
-    cli.consumeMessage();              // frees the assembled buffer
+Call `tick()` regularly, drain `pollEvent()`, and send after the connection event.
+Channel IDs are indexes into `options.channels`, so channel 0 above suits position
+updates and channel 1 suits game events.
+
+Read messages with `peekMessage()` and `messageData()`. Call `consumeMessage()`
+after processing each message to release its storage.
+
+<details>
+<summary>Complete UDP echo example</summary>
+
+This program runs both peers on localhost, sends one reliable message, prints the
+reply, and exits. It binds the server to port 9000.
+
+```zig
+const std = @import("std");
+const zanoza = @import("zanoza");
+
+const options: zanoza.Options = .{
+    .max_clients = 4,
+    .max_payload_size = 256,
+    .channels = &.{
+        .{ .kind = .UnreliableLatest },
+        .{ .kind = .ReliableOrdered, .reliable_buffer = 16 },
+    },
+};
+const Server = zanoza.TransportServer(options, void);
+const Client = zanoza.TransportClient(options, void);
+
+pub fn main() !void {
+    const allocator = std.heap.page_allocator;
+    var io = std.Io.Threaded.init(allocator, .{});
+    defer io.deinit();
+
+    var challenge_key: [32]u8 = undefined;
+    io.io().random(&challenge_key);
+
+    const address = try zanoza.Address.parseIp4("127.0.0.1", 9000);
+    const server_config: zanoza.ServerConfig = .{
+        .protocol_id = 1,
+        .handshake_alive_ns = 5 * std.time.ns_per_s,
+        .client_timeout_ns = 30 * std.time.ns_per_s,
+        .public_addresses = &.{},
+        .secure = false,
+        .challenge_key = challenge_key,
+        .secret_key = null,
+    };
+    var server = try Server.init(allocator, server_config, address);
+    defer server.deinit();
+
+    var client = try Client.init(
+        .{ .protocol_id = 1, .server_addr = address },
+        try zanoza.Address.parseIp4("127.0.0.1", 0),
+    );
+    defer client.deinit();
+    try client.connect();
+
+    while (true) {
+        client.tick();
+        server.tick();
+
+        while (client.pollEvent()) |event| {
+            if (event == .Connected) try client.sendOnChannel(1, "hello");
+        }
+        while (server.pollEvent()) |_| {}
+
+        while (server.peekMessage()) |message| {
+            try server.sendOnChannel(
+                message.cid,
+                message.channel_id,
+                server.messageData(message),
+            );
+            server.consumeMessage();
+        }
+        while (client.peekMessage()) |message| {
+            std.debug.print("{s}\n", .{client.messageData(message)});
+            client.consumeMessage();
+            return;
+        }
+        try std.Io.sleep(io.io(), .fromNanoseconds(std.time.ns_per_ms), .awake);
+    }
 }
 ```
 
-> **Note:** `pollMessage` (copy-out convenience) truncates assembled messages to
-> `max_user_data` bytes. Use the zero-copy `peekMessage` / `messageData` /
-> `consumeMessage` API for fragmented channels.
+For longer-running applications, handle `Disconnected` / `ClientDisconnected`
+events and back off when outgoing or reliable buffers are full. Connection IDs
+identify server slots and can be reused after disconnection.
 
----
+</details>
 
-## TransportServer / TransportClient
+<details>
+<summary>Add the package to your application</summary>
 
-The transport wrappers own a socket and drive the full I/O loop for you.
-Pass `void` as the second type argument to use the built-in UDP socket.
+Add the dependency from your application's directory.
 
-### TransportServer
+```sh
+zig fetch --save git+https://github.com/SanzharKuandyk/zanoza
+```
+
+After creating your executable in `build.zig`, import the dependency's module.
 
 ```zig
-const Srv = zanoza.TransportServer(opts, void);
+const zanoza = b.dependency("zanoza", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("zanoza", zanoza.module("zanoza"));
+```
 
-// init
-var srv = try Srv.init(allocator, server_config, bind_address);
-defer srv.deinit();
+The application can then use `@import("zanoza")`.
 
-// --- per-tick ---
-srv.tick(); // recv → state machine → send → retransmit reliable
+</details>
 
-// lifecycle events
-while (srv.pollEvent()) |ev| {
-    switch (ev) {
-        .ClientConnected => |e| {
-            // e.cid       : u64           — stable slot index, 0-based
-            // e.addr      : zanoza.Address
-            // e.user_data : ?[opts.user_data_size]u8  (null if plain connect)
+## Reference
+
+<details>
+<summary>Configuration and connection lifecycle</summary>
+
+`Options` is passed at comptime to both transport types. Use matching channel IDs,
+delivery kinds, fragment sizes, and token layouts on both peers. Receiver payload
+limits must accommodate incoming messages. Queue capacities are local limits.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `max_clients` | `1024` | Server connection slots |
+| `max_pending_clients` | `null` | Recycled connection-slot queue capacity, derived as `max_clients * 2` |
+| `max_payload_size` | `1024` | User-data bytes per data packet |
+| `outgoing_queue_size` | `256` | Packets waiting to be sent |
+| `messages_queue_size` | `256` | Incoming message queue and payload-pool capacity |
+| `events_queue_size` | `256` | Connection lifecycle events |
+| `nonce_window` | `256` | Recent handshake nonces retained for replay checks |
+| `reliable_resend_ns` | `100 * std.time.ns_per_ms` | Minimum retransmission timeout |
+| `user_data_size` | `256` | Bytes of application data in a connect token |
+| `max_token_addresses` | `8` | Address capacity in the built-in connect token |
+| `ConnectToken` | `void` | Selects the built-in token type |
+| `channels` | One `Unreliable` channel | Channel schema, up to 128 entries |
+
+Queue sizes, `nonce_window`, and the resolved `max_pending_clients` must be positive
+powers of two. If pending capacity is derived from `max_clients`, that derived
+value must satisfy the same constraint. The configuration validator accepts
+payload capacities between 1 and 65,535 bytes.
+
+Each channel has these settings.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `kind` | Required | Delivery mode |
+| `reliable_buffer` | `64` | Unacknowledged send slots for reliable channels |
+| `ordered_recv_window` | `32` | Buffered future packets for `ReliableOrdered`, with `0` disabling buffering |
+| `unordered_recv_window` | `64` | Deduplication window for `ReliableUnordered` |
+| `frag_config` | `null` | Optional fragmentation settings |
+
+Each channel uses its own configured capacities. Server reliable send buffers and
+ordered receive windows are allocated on first use. RTT tracking computes the
+retransmission timeout as `max(smoothed_rtt * 2, reliable_resend_ns)`.
+
+`ServerConfig` supplies the protocol ID, handshake lifetime, client timeout,
+challenge key, and token-authentication settings. `ClientConfig` supplies the
+protocol ID and server address, with these timing defaults.
+
+- `connect_retry_ns` is 500 ms.
+- `connect_timeout_ns` is 5 seconds.
+- `timeout_ns` is 10 seconds.
+
+The server and client protocol IDs must match. Timeouts measure received traffic,
+so active sessions need regular packets. Client events are `Connected` and
+`Disconnected`. Server events are `ClientConnected` and `ClientDisconnected`,
+carrying the connection ID and peer address. Connected server events also carry
+optional token user data.
+
+Configuration definitions are in [root.zig](src/root.zig),
+[channel.zig](src/channel.zig), [server/config.zig](src/server/config.zig), and
+[client/config.zig](src/client/config.zig).
+
+</details>
+
+<details>
+<summary>Fragmentation, packet sizes, and message ownership</summary>
+
+Enable fragmentation through `frag_config` on `Unreliable`, `ReliableOrdered`, or
+`ReliableUnordered`. All three configuration fields are required.
+
+```zig
+const options: zanoza.Options = .{
+    .max_payload_size = 256,
+    .channels = &.{.{
+        .kind = .ReliableOrdered,
+        .reliable_buffer = 64,
+        .frag_config = .{
+            .policy = .when_needed,
+            .fragment_size = 200,
+            .frag_assembly_slots = 8,
         },
-        .ClientDisconnected => |e| {
-            // e.cid, e.addr
-        },
-    }
-}
-
-// incoming messages — zero-copy (preferred for large payloads)
-while (srv.peekMessage()) |msg| {
-    // msg : *const MessageView — points into ring buffer, no data copy
-    // msg.cid        : u64
-    // msg.channel_id : u8
-    // Use srv.messageData(msg) to read the payload bytes.
-    _ = srv.messageData(msg);
-    srv.consumeMessage(); // advance the ring buffer and release pooled bytes
-}
-// or copy-out variant (simpler, fine for small payloads)
-while (srv.pollMessage()) |msg| {
-    _ = msg.data[0..msg.len]; // msg is a value copy
-}
-
-// outgoing
-try srv.sendOnChannel(cid, channel_id, data_slice);
-
-// access the underlying state machine (e.g. to send raw payloads)
-const sm = srv.getStateMachine(); // *Server(opts)
-try sm.sendPayload(cid, payload_body);
-```
-
-### TransportClient
-
-```zig
-const Cli = zanoza.TransportClient(opts, void);
-
-var cli = try Cli.init(client_config, bind_address);
-defer cli.deinit();
-
-try cli.connect();         // plain
-// try cli.connectSecure(token); // with ConnectToken
-
-// --- per-tick ---
-cli.tick();
-
-while (cli.pollEvent()) |ev| {
-    switch (ev) {
-        .Connected    => {},
-        .Disconnected => {},
-    }
-}
-
-// zero-copy (preferred for large payloads)
-while (cli.peekMessage()) |msg| {
-    // msg : *const MessageView — points into ring buffer, no data copy
-    // Use cli.messageData(msg) to read the payload bytes.
-    _ = cli.messageData(msg);
-    cli.consumeMessage();
-}
-// or copy-out variant
-while (cli.pollMessage()) |msg| {
-    _ = msg.data[0..msg.len];
-}
-
-try cli.sendOnChannel(channel_id, data_slice);
-
-cli.disconnect(); // graceful
-```
-
-### ServerConfig
-
-```zig
-const cfg = zanoza.ServerConfig.init(
-    protocol_id,          // u32  — must match client
-    handshake_alive_ns,   // u64  — ns; pending handshake lifetime
-    client_timeout_ns,    // u64  — ns; idle disconnect threshold
-    public_addresses,     // []const zanoza.Address  (secure mode)
-    secure,               // bool — require signed ConnectToken
-    challenge_key,        // [32]u8
-    secret_key,           // ?[32]u8  (required when secure = true)
-);
-```
-
-### ClientConfig
-
-```zig
-const cfg: zanoza.ClientConfig = .{
-    .protocol_id        = 1,
-    .server_addr        = server_address,
-    .connect_timeout_ns = 5  * std.time.ns_per_s,  // ns
-    .timeout_ns         = 30 * std.time.ns_per_s,
+    }},
 };
 ```
 
----
+`when_needed` fragments messages exceeding `max_payload_size`. `always` uses
+fragment framing for every message, including a single small or empty message.
+`UnreliableLatest` supports ordinary messages up to the packet's user-data limit.
 
-## Custom socket
+`fragment_size` is the maximum user-data bytes per fragment and must be between
+1 and `max_payload_size`. `frag_assembly_slots` must be positive and sets the
+number of partial messages tracked per channel per peer.
 
-Pass any type as the second argument to `TransportServer` / `TransportClient`.
-The type must satisfy the following interface exactly — the compiler checks every
-parameter type and return type and emits a focused `@compileError` if anything
-is wrong:
+A 600-byte message with 200-byte fragments produces three packets. Each packet
+carries its own fragment index, the shared message ID, fragment count, and complete
+message size.
+
+| Size | Current limit |
+| --- | --- |
+| Ordinary data header | 8 bytes, plus user data |
+| Fragmented data header | 14 bytes, plus fragment data |
+| Complete fragmented message | `min(65_535, 255 * fragment_size)` bytes |
+| Fragment count | 255 |
+| Send admission | Every fragment must fit the available outgoing slots and, for reliable channels, reliable send slots |
+
+Oversized ordinary messages return `MessageTooLarge`. Reliable fragments are
+acknowledged and retransmitted individually. Assembly slot selection uses the
+message ID modulo `frag_assembly_slots`, and a collision replaces an incomplete
+assembly.
+
+Transport `messageData()` returns the whole assembled message. Its bytes are valid
+until `consumeMessage()` or transport cleanup. `pollMessage()` copies at most
+`max_payload_size` bytes, so use the peek/read/consume API for large messages.
+Consume each message once and copy its data first if the application needs to
+retain it.
+
+</details>
+
+<details>
+<summary>Error sets and handling capacity limits</summary>
+
+Fallible APIs use named model-wide error sets exported from `zanoza`.
+
+| API | Error set |
+| --- | --- |
+| Raw client | `ClientError` |
+| Raw server | `ServerError` |
+| Shared channel/storage failures | `TransportError` |
+| Client transport | `TransportClientError = ClientError || TransportError` |
+| Server transport | `TransportServerError = ServerError || TransportError` |
+| Built-in UDP socket opening | `SocketError` |
+| Packet codec | `PacketError` |
+| Built-in token creation | `HandshakeError` |
+
+Each client, server, and transport type exposes `Error`. For a transport `T`,
+`init` returns `T.InitError!T`, combining `T.Error` with the chosen socket's open
+errors. `initWithSocket` uses `T.Error`. Custom sockets define their additional
+constructor errors.
+
+`ReliableBufferFull` means the next reliable send slots are awaiting ACKs.
+`IoError` means a bounded queue or payload pool is exhausted. Let the transport
+tick and retain reliable application messages for a later retry.
+`MessageTooLarge` reports a size limit, `InvalidChannel` reports an unknown
+channel ID, and `OutOfMemory` reports a failed library allocation.
+
+The transport's `tick()` handles packet-processing and socket I/O outcomes
+internally. Its return type is `void`.
+
+Definitions live in [client/error.zig](src/client/error.zig),
+[server/error.zig](src/server/error.zig), and
+[transport/error.zig](src/transport/error.zig).
+
+</details>
+
+<details>
+<summary>Custom sockets and in-memory tests</summary>
+
+Pass a socket type as the second argument to `TransportServer` or
+`TransportClient`. The compiler checks these method signatures.
+
+```text
+open(addr: zanoza.Address) Error!Self
+close(self: *Self) void
+recvfrom(self: *Self, buffer: []u8) ?RecvResult
+sendto(self: *Self, addr: zanoza.Address, data: []const u8) void
+
+RecvResult has fields addr: zanoza.Address and len: usize.
+```
+
+`Error` is the socket's own open error set.
+
+`recvfrom` returns `null` when a datagram is unavailable. `sendto` returns
+`void`. A successfully initialized transport owns its supplied socket
+and closes it during cleanup.
+
+For in-memory testing, create a `LoopbackSocket.Pair` and use its server/client
+endpoints.
 
 ```zig
-const MySocket = struct {
-    // Called by TransportServer/Client.init to bind the socket.
-    pub fn open(addr: zanoza.Address) !MySocket { ... }
+var pair: zanoza.LoopbackSocket.Pair = .{};
+var server = try zanoza.TransportServer(options, zanoza.LoopbackSocket)
+    .initWithSocket(allocator, server_config, pair.serverSocket(server_address));
+defer server.deinit();
 
-    // Called by deinit.
-    pub fn close(self: *MySocket) void { ... }
-
-    // Non-blocking receive.  Return null when no datagram is available.
-    // The returned struct must have exactly these two fields with these types.
-    pub fn recvfrom(self: *MySocket, buf: []u8) ?struct {
-        addr: zanoza.Address,
-        len:  usize,
-    } { ... }
-
-    // Fire-and-forget send.
-    pub fn sendto(self: *MySocket, addr: zanoza.Address, data: []const u8) void { ... }
-};
-
-const Srv = zanoza.TransportServer(opts, MySocket);
+var client = try zanoza.TransportClient(options, zanoza.LoopbackSocket)
+    .initWithSocket(client_config, pair.clientSocket(client_address));
+defer client.deinit();
+try client.connect();
 ```
 
-What the compiler checks (examples of the errors you get when wrong):
+Keep the pair alive at the same memory location while either transport uses it.
+Alternate `client.tick()` and `server.tick()` to drive packets and the handshake.
+Each loopback direction buffers up to 64 packets, dropping excess packets.
 
-```
-Socket missing: pub fn open(zanoza.Address) !MySocket
-Socket.open parameter must be zanoza.Address, got u16
-Socket.open error-union payload must be MySocket, got void
-Socket.close must return void, got u32
-Socket.recvfrom must return an optional (?RecvResult)
-Socket.recvfrom result .addr must be zanoza.Address
-Socket.sendto third parameter must be []const u8, got []u8
+Run the library tests from the repository root.
+
+```sh
+zig build test
+zig build test -Doptimize=ReleaseSafe
 ```
 
-When a custom socket is provided, `TransportServer` and `TransportClient` also
-expose `initWithSocket` for use-cases where you construct the socket yourself
-(e.g. in tests):
+The [integration tests](src/tests.zig) show handshakes, retransmission,
+fragmentation, per-channel capacity limits, and custom socket errors.
+
+</details>
+
+<details>
+<summary>Raw state machines and packet headers</summary>
+
+`zanoza.Server(options)` and `zanoza.Client(options)` expose the connection state
+machines for applications that drive their own I/O. Update their clocks with
+`updateNow()` or `update(timestamp)`, feed datagrams to `handlePacket`, and
+serialize/drain outgoing packets through your socket.
+
+Raw receive entries contain `header` and a pooled `payload` reference. Release
+that reference separately when consuming a raw message.
 
 ```zig
-var srv = try zanoza.TransportServer(opts, MySocket)
-    .initWithSocket(allocator, server_config, my_socket_value);
-
-var cli = try zanoza.TransportClient(opts, MySocket)
-    .initWithSocket(client_config, my_socket_value);
+while (server.peekMessage()) |message| {
+    const bytes = server.payloadData(message.payload);
+    std.debug.print("channel={} data={s}\n", .{ message.header.channel_id, bytes });
+    server.releasePayload(message.payload);
+    server.consumeMessage();
+}
 ```
 
----
-
-## Secure connections / ConnectToken
-
-When `ServerConfig.secure = true`, the server requires every `ConnectionRequest`
-to carry a signed token issued by a trusted matchmaking server.
-
-### Using the built-in DefaultConnectToken
+Raw outgoing slots separate metadata and user bytes.
 
 ```zig
-// matchmaking server — has the secret key
-const token = try zanoza.handshake.DefaultConnectToken(
-    opts.user_data_size,
-    opts.max_token_addresses,
-).create(
-    client_id,
-    expires_at,       // absolute ns timestamp
-    public_addresses, // []const zanoza.Address
-    user_data,        // [opts.user_data_size]u8
-    &secret_key,
-);
-
-// client — receives token over HTTPS/TCP and uses it
-try cli.connectSecure(token);
+const outgoing = try server.reservePayloadSlot(cid);
+outgoing.packet.Payload.header = .{ .channel_id = 0, .seq = 1 };
+@memcpy(outgoing.packet.Payload.body[0..data.len], data);
+outgoing.packet.Payload.len = @intCast(data.len);
 ```
 
-### Custom ConnectToken
+`sendPayload` is the copying alternative with default header fields. The
+transport layer supplies channel ordering, ACK handling, retransmission, and
+reassembly around these state machines.
 
-Set `opts.ConnectToken = MyToken` and implement the interface below.
-The compiler validates the signatures precisely:
+[packet.zig](src/packet.zig) defines the serialized layout and codec.
+[channel.zig](src/channel.zig) defines channel configuration and delivery logic.
+[channel_state.zig](src/channel_state.zig) builds the per-channel state types.
 
-```zig
-const MyToken = struct {
-    pub const wire_size = 128; // exact byte size on the wire
+</details>
 
-    user_data: [opts.user_data_size]u8, // required field, exact type
+<details>
+<summary>Connect tokens and current constraints</summary>
 
-    pub fn encode(self: *const MyToken, out: *[wire_size]u8) void { ... }
+The handshake uses HMAC-SHA256 challenge tokens. With `ServerConfig.secure = true`,
+connection requests must carry a valid signed connect token. The issuer creates
+a token with `zanoza.handshake.DefaultConnectToken(user_data_size, max_addresses).create`,
+and the client starts the handshake with `connectSecure(token)`.
 
-    pub fn decode(bytes: *const [wire_size]u8) ?MyToken { ... }
+Token authentication covers connection requests. Payload bytes travel in plaintext.
 
-    pub fn verify(
-        self:       *const MyToken,
-        now:        u64,
-        secret_key: *const [32]u8,
-    ) bool { ... }
+Current server call sites pass elapsed nanoseconds since server initialization to
+`token.verify(now, secret_key)` and the client's source address to
+`token.authorizeAddress(addr)`. Token issuance must account for that clock and
+address interpretation. The `ServerConfig.public_addresses` list is stored in
+the server configuration.
 
-    pub fn authorizeAddress(
-        self: *const MyToken,
-        addr: zanoza.Address,
-    ) bool { ... }
-};
-```
+A custom `Options.ConnectToken` type supplies `wire_size`, `user_data`, `encode`,
+`decode`, `verify`, and `authorizeAddress`. The current custom-token validator
+uses older reflection fields and needs a Zig 0.17 update before custom token
+types can be used on the server.
 
-Errors emitted when the interface is wrong:
+See [handshake.zig](src/handshake.zig),
+[server/server.zig](src/server/server.zig), and
+[validation/connect_token.zig](src/validation/connect_token.zig) for the current
+contract and validation.
 
-```
-ConnectToken must have: pub const wire_size: usize
-ConnectToken must have: pub fn encode(*const @This(), *[wire_size]u8) void
-ConnectToken must have: pub fn decode(*const [wire_size]u8) ?@This()
-ConnectToken must have: pub fn authorizeAddress(*const @This(), zanoza.Address) bool
-```
+</details>
 
----
+<details>
+<summary>Project notes</summary>
 
-## Raw state machines
+Previously named zenet. Inspired by [renet](https://github.com/lucaspoffo/renet).
 
-`zanoza.Server` and `zanoza.Client` are socket-agnostic state machines — drive
-the socket yourself if you need full control over when packets are sent.
+AI-assisted project. I wrote part of state-machines and transport myself, but other parts were done with AI with my view on things.
+</details>
 
-### Server
-
-```zig
-const Srv = zanoza.Server(opts);
-
-var srv = try Srv.init(allocator, config);
-defer srv.deinit();
-
-// each tick
-srv.updateNow();
-
-// feed a received datagram
-try srv.handlePacket(source_addr, datagram_bytes);
-
-// drain outgoing — zero-copy peek/consume pattern
-while (srv.peekOutgoing()) |out| {
-    // out : *const Outgoing — points into the ring buffer
-    // out.addr   : zanoza.Address
-    // out.packet : Packet(opts)
-    udp_send(out.addr, out.packet);
-    srv.consumeOutgoing();
-}
-// or copy-out variant
-while (srv.pollOutgoing()) |out| {
-    udp_send(out.addr, out.packet);
-}
-
-// drain lifecycle events — zero-copy peek/consume pattern
-while (srv.peekEvent()) |ev| {
-    switch (ev.*) {
-        .ClientConnected    => |e| { _ = e.cid; },
-        .ClientDisconnected => |e| { _ = e.cid; },
-    }
-    srv.consumeEvent();
-}
-// or copy-out variant
-while (srv.pollEvent()) |ev| { ... }
-
-// drain inbound messages — zero-copy peek/consume pattern
-while (srv.peekMessage()) |msg| {
-    // msg : *const RawMessageView — points into ring buffer
-    // msg.cid     : u64
-    // msg.payload : Pool.Ref  — opaque handle, use payloadData() to read
-    const data = srv.payloadData(msg.payload);
-    _ = data; // []const u8 — user-data bytes only; msg.header carries delivery metadata
-    srv.releasePayload(msg.payload);
-    srv.consumeMessage(); // advance ring only, does NOT release
-}
-
-// send a raw payload body to a connected client (copies into outgoing ring)
-try srv.sendPayload(cid, payload_body); // payload_body: []const u8
-
-// zero-copy send: reserve a slot and write directly (avoids one memcpy)
-const out = try srv.reservePayloadSlot(cid);
-const body = &out.packet.Payload.body;
-// set delivery metadata separately, write user data into body[0..], then set its length:
-out.packet.Payload.header = .{ .channel_id = 0, .seq = 1 };
-out.packet.Payload.len = body_len;
-```
-
-### Client
-
-```zig
-const Cli = zanoza.Client(opts);
-
-var cli = try Cli.init(.{ .protocol_id = 1, .server_addr = server_addr });
-
-try cli.connect(); // or cli.connectSecure(token)
-
-// each tick
-cli.updateNow();
-
-try cli.handlePacket(datagram_bytes);
-
-// drain outgoing — zero-copy peek/consume pattern
-while (cli.peekOutgoing()) |out| {
-    udp_send(out.addr, out.packet);
-    cli.consumeOutgoing();
-}
-
-while (cli.peekEvent()) |ev| {
-    switch (ev.*) {
-        .Connected    => {},
-        .Disconnected => {},
-    }
-    cli.consumeEvent();
-}
-
-// drain inbound messages — zero-copy peek/consume pattern
-while (cli.peekMessage()) |msg| {
-    // msg : *const RawMessageView — points into ring buffer
-    // msg.payload : Pool.Ref  — opaque handle, use payloadData() to read
-    const data = cli.payloadData(msg.payload);
-    _ = data; // []const u8 — user-data bytes only; msg.header carries delivery metadata
-    cli.releasePayload(msg.payload);
-    cli.consumeMessage(); // advance ring only, does NOT release
-}
-
-// send a raw payload body (copies into outgoing ring)
-try cli.sendPayload(payload_body);
-
-// zero-copy send: reserve a slot and write directly
-const out = try cli.reservePayloadSlot();
-out.packet.Payload.len = body_len;
-
-cli.disconnect();
-```
-
----
-
-## Testing with LoopbackSocket
-
-`zanoza.LoopbackSocket` is an in-memory socket backed by two fixed-size queues.
-Create a `Pair`, get the two socket endpoints from it, and pass them to
-`initWithSocket` — no OS network stack involved.
-
-```zig
-const LoopbackSocket = zanoza.LoopbackSocket;
-
-var pair: LoopbackSocket.Pair = .{};
-
-const srv_addr = try zanoza.Address.parseIp4("127.0.0.1", 9000);
-const cli_addr = try zanoza.Address.parseIp4("127.0.0.1", 9001);
-
-var srv = try zanoza.TransportServer(opts, LoopbackSocket)
-    .initWithSocket(allocator, server_config, pair.serverSocket(srv_addr));
-defer srv.deinit();
-
-var cli = try zanoza.TransportClient(opts, LoopbackSocket)
-    .initWithSocket(client_config, pair.clientSocket(cli_addr));
-defer cli.deinit();
-
-try cli.connect();
-
-// drive the handshake — packets flow through the shared queues
-for (0..10) |_| { cli.tick(); srv.tick(); }
-
-const ev = srv.pollEvent().?;
-std.debug.assert(ev == .ClientConnected);
-```
-
-The `Pair` must remain alive on the stack for the lifetime of both transport
-objects, because the sockets hold interior pointers into it.
-
----
-
-## Project structure
-
-```
-src/
-  root.zig              public API re-exports and Options
-  packet.zig            wire-format serialization/deserialization
-  channel.zig           ChannelConfig, ChannelLayout, header encoding,
-                        FragExtra helpers, ReliableState, RttState,
-                        recv state machines
-  handshake.zig         HMAC challenge tokens, DefaultConnectToken,
-                        validateConnectTokenInterface
-  payload_pool.zig      O(1) free-list pool for inbound message bytes
-  ring_buffer.zig       fixed-capacity queue with peek/consume zero-copy API
-  addr.zig              address normalization for hash-map keys
-  nonce.zig             sliding-window replay protection
-  tests.zig             state-machine integration tests + loopback transport tests
-
-  server/
-    server.zig          Server state machine (handlePacket, sendPayload,
-                        reservePayloadSlot, peekOutgoing/consumeOutgoing,
-                        peekMessage/consumeMessage/releasePayload/payloadData, …)
-    config.zig          ServerConfig
-    connection.zig      per-client connection state
-    error.zig           ServerError
-
-  client/
-    client.zig          Client state machine (handlePacket, sendPayload,
-                        reservePayloadSlot, peekOutgoing/consumeOutgoing,
-                        peekMessage/consumeMessage/releasePayload/payloadData, …)
-    config.zig          ClientConfig
-    error.zig           ClientError
-
-  transport/
-    socket.zig          RecvResult type + validateSocketInterface
-    udp.zig             thin built-in UDP adapter selector
-    loopback.zig        in-memory LoopbackSocket + Pair for testing
-    server.zig          TransportServer — owns socket, drives I/O loop,
-                        per-client RTT tracking, fragment reassembly
-    client.zig          TransportClient — owns socket, drives I/O loop,
-                        per-connection RTT tracking, fragment reassembly
-
-  validation/
-    root.zig            re-exports all validation helpers
-    options.zig         comptime checks for Options (channel counts, sizes, …)
-    socket.zig          comptime checks for custom socket interface
-    connect_token.zig   comptime checks for custom ConnectToken interface
-```
-
----
-
-## License
-
-MIT
+[MIT license](LICENSE).

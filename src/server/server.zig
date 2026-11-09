@@ -31,6 +31,7 @@ pub fn Server(comptime opts: Options) type {
 
     return struct {
         const Self = @This();
+        pub const Error = ServerError;
 
         pub const PayloadPool = Pool;
 
@@ -85,7 +86,7 @@ pub fn Server(comptime opts: Options) type {
         messages: RingQueue(RawMessageView, opts.messages_queue_size),
         payload_pool: Pool,
 
-        pub fn init(allocator: std.mem.Allocator, config: ServerConfig) !Self {
+        pub fn init(allocator: std.mem.Allocator, config: ServerConfig) ServerError!Self {
             var io_threaded: std.Io.Threaded = .init(allocator, .{});
             errdefer io_threaded.deinit();
             const now = std.Io.Timestamp.now(io_threaded.io(), .awake);
@@ -236,7 +237,7 @@ pub fn Server(comptime opts: Options) type {
             self.outgoing.advance();
         }
 
-        pub fn handlePacket(self: *Self, addr: root.Address, buffer: []const u8) (ServerError || error{OutOfMemory})!void {
+        pub fn handlePacket(self: *Self, addr: root.Address, buffer: []const u8) ServerError!void {
             const pkt = packet_mod.deserialize(opts, buffer) catch return error.InvalidPacket;
 
             switch (pkt) {

@@ -6,6 +6,9 @@ const CHALLENGE_KEY_SIZE = root.CHALLENGE_KEY_SIZE;
 
 pub const ChallengeToken = [16]u8;
 
+/// Failures creating a built-in connect token.
+pub const HandshakeError = error{TooManyAddresses};
+
 pub fn generateChallengeToken(
     challenge_key: *const [CHALLENGE_KEY_SIZE]u8,
     cid: u64,
@@ -51,6 +54,7 @@ pub fn DefaultConnectToken(comptime user_data_size: usize, comptime max_addresse
 
     return struct {
         const Self = @This();
+        pub const Error = HandshakeError;
 
         pub const wire_size = 8 + 8 + 1 + (max_addresses * AddressKey.WIRE_SIZE) + user_data_size + 16;
 
@@ -67,7 +71,7 @@ pub fn DefaultConnectToken(comptime user_data_size: usize, comptime max_addresse
             public_addresses: []const root.Address,
             user_data: [user_data_size]u8,
             secret_key: *const [SECRET_KEY_SIZE]u8,
-        ) !Self {
+        ) HandshakeError!Self {
             if (public_addresses.len > max_addresses) return error.TooManyAddresses;
 
             var normalized: [max_addresses]AddressKey = @splat(.{

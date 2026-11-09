@@ -1,4 +1,5 @@
 const std = @import("std");
+const SocketError = @import("../transport/error.zig").SocketError;
 const RecvResult = @import("../transport/socket.zig").RecvResult;
 const Address = @import("../root.zig").Address;
 
@@ -49,9 +50,10 @@ extern "ws2_32" fn WSACleanup() callconv(.winapi) c_int;
 extern "ws2_32" fn WSAGetLastError() callconv(.winapi) c_int;
 
 pub const UdpSocket = struct {
+    pub const Error = SocketError;
     handle: Handle,
 
-    pub fn open(addr: Address) !UdpSocket {
+    pub fn open(addr: Address) SocketError!UdpSocket {
         var wsa_data: WSAData = undefined;
         if (WSAStartup(0x0202, &wsa_data) != 0) return error.SocketInitFailed;
         errdefer _ = WSACleanup();

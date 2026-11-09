@@ -1,4 +1,5 @@
 const std = @import("std");
+const TransportServerError = @import("error.zig").TransportServerError;
 const root = @import("../root.zig");
 const validation = @import("../validation/root.zig");
 const packet_mod = @import("../packet.zig");
@@ -31,6 +32,9 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
 
     return struct {
         const Self = @This();
+        pub const Error = TransportServerError;
+        /// Constructor errors include the selected socket implementation's open errors.
+        pub const InitError = Error || socket_mod.OpenError(Socket);
 
         fn ChannelState(comptime channel_id: u8) type {
             return state_mod.ChannelState(opts.channels[channel_id], opts.max_payload_size, .lazy);
@@ -78,7 +82,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
         events: RingQueue(Event, opts.events_queue_size),
         messages: RingQueue(MessageView, opts.messages_queue_size),
 
-        pub fn init(allocator: std.mem.Allocator, config: root.ServerConfig, bind_addr: root.Address) !Self {
+        pub fn init(allocator: std.mem.Allocator, config: root.ServerConfig, bind_addr: root.Address) InitError!Self {
             const socket = try Socket.open(bind_addr);
             errdefer {
                 var s = socket;
@@ -87,7 +91,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             return initWithSocket(allocator, config, socket);
         }
 
-        pub fn initWithSocket(allocator: std.mem.Allocator, config: root.ServerConfig, socket: Socket) !Self {
+        pub fn initWithSocket(allocator: std.mem.Allocator, config: root.ServerConfig, socket: Socket) TransportServerError!Self {
             const channel_states = try allocator.create([opts.max_clients]States);
             errdefer allocator.destroy(channel_states);
             for (channel_states) |*states| states.* = initial_states;
@@ -254,14 +258,14 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             }
         }
 
-        pub fn sendOnChannel(self: *Self, cid: u64, channel_id: u8, data: []const u8) !void {
+        pub fn sendOnChannel(self: *Self, cid: u64, channel_id: u8, data: []const u8) TransportServerError!void {
             inline for (opts.channels, 0..) |_, index| {
                 if (channel_id == index) return self.sendOnConfiguredChannel(cid, @intCast(index), data);
             }
             return error.InvalidChannel;
         }
 
-        fn sendOnConfiguredChannel(self: *Self, cid: u64, comptime channel_id: u8, data: []const u8) !void {
+        fn sendOnConfiguredChannel(self: *Self, cid: u64, comptime channel_id: u8, data: []const u8) TransportServerError!void {
             if (channel_id >= channel_count) return error.InvalidChannel;
             const slot = std.math.cast(usize, cid) orelse return error.UnknownClient;
             if (slot >= opts.max_clients or self.srv.clients[slot] == null) return error.UnknownClient;
@@ -315,7 +319,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             outgoing.packet.Payload.len = @intCast(data.len);
         }
 
-        fn sendFragmented(self: *Self, cid: u64, comptime channel_id: u8, data: []const u8, fragment_size: usize) !void {
+        fn sendFragmented(self: *Self, cid: u64, comptime channel_id: u8, data: []const u8, fragment_size: usize) TransportServerError!void {
             const slot = std.math.cast(usize, cid) orelse return error.UnknownClient;
             if (slot >= opts.max_clients or self.srv.clients[slot] == null) return error.UnknownClient;
             if (data.len > std.math.maxInt(u16)) return error.MessageTooLarge;
@@ -546,7 +550,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             }
         }
 
-        fn reliableSendState(self: *Self, slot: usize, comptime channel_id: u8) !?*ChannelState(channel_id).Send {
+        fn reliableSendState(self: *Self, slot: usize, comptime channel_id: u8) TransportServerError!?*ChannelState(channel_id).Send {
             const state = switch (opts.channels[channel_id].kind) {
                 .ReliableOrdered => self.orderedSendPtr(slot, channel_id),
                 .ReliableUnordered => self.unorderedSendPtr(slot, channel_id),
@@ -585,7 +589,7 @@ pub fn TransportServer(comptime opts: root.Options, comptime SocketType: type) t
             return &self.channel_states[slot][channel_id].fragments;
         }
 
-        fn getOrCreateReliableState(self: *Self, comptime channel_id: u8, send_ptr: *?*ChannelState(channel_id).Send) !*ChannelState(channel_id).Send {
+        fn getOrCreateReliableState(self: *Self, comptime channel_id: u8, send_ptr: *?*ChannelState(channel_id).Send) std.mem.Allocator.Error!*ChannelState(channel_id).Send {
             if (send_ptr.*) |rel| return rel;
 
             // Unused reliable channels stay cheap until first use.

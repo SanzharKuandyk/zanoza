@@ -1070,3 +1070,71 @@ test "per-channel assembly counts control interleaved messages and reset cleanup
     try testing.expectEqualStrings("reused", srv.messageData(message));
     srv.consumeMessage();
 }
+
+test "public model operations declare their named error sets" {
+    try testing.expect(Cli.Error == zanoza.ClientError);
+    try testing.expect(Srv.Error == zanoza.ServerError);
+    try testing.expect(TCli.Error == zanoza.TransportClientError);
+    try testing.expect(TSrv.Error == zanoza.TransportServerError);
+    try testing.expect(zanoza.UdpSocket.Error == zanoza.SocketError);
+    try testing.expect(zanoza.PacketError == (packet_mod.SerializeError || packet_mod.DeserializeError));
+    const Token = zanoza.handshake.DefaultConnectToken(opts.user_data_size, opts.max_token_addresses);
+    const token_result = @typeInfo(@TypeOf(Token.create)).@"fn".return_type.?;
+    try testing.expect(Token.Error == zanoza.HandshakeError);
+    try testing.expect(@typeInfo(token_result).error_union.error_set == zanoza.HandshakeError);
+
+    inline for (.{ Cli.init, Cli.connect, Cli.connectSecure, Cli.handlePacket, Cli.sendPayload, Cli.reservePayloadSlot }) |function| {
+        const result = @typeInfo(@TypeOf(function)).@"fn".return_type.?;
+        try testing.expect(@typeInfo(result).error_union.error_set == zanoza.ClientError);
+    }
+    inline for (.{ Srv.init, Srv.handlePacket, Srv.sendPayload, Srv.reservePayloadSlot }) |function| {
+        const result = @typeInfo(@TypeOf(function)).@"fn".return_type.?;
+        try testing.expect(@typeInfo(result).error_union.error_set == zanoza.ServerError);
+    }
+    inline for (.{ TCli.initWithSocket, TCli.connect, TCli.connectSecure, TCli.sendOnChannel }) |function| {
+        const result = @typeInfo(@TypeOf(function)).@"fn".return_type.?;
+        try testing.expect(@typeInfo(result).error_union.error_set == zanoza.TransportClientError);
+    }
+    inline for (.{ TSrv.initWithSocket, TSrv.sendOnChannel }) |function| {
+        const result = @typeInfo(@TypeOf(function)).@"fn".return_type.?;
+        try testing.expect(@typeInfo(result).error_union.error_set == zanoza.TransportServerError);
+    }
+    const client_init = @typeInfo(@TypeOf(TCli.init)).@"fn".return_type.?;
+    const server_init = @typeInfo(@TypeOf(TSrv.init)).@"fn".return_type.?;
+    try testing.expect(@typeInfo(client_init).error_union.error_set == TCli.InitError);
+    try testing.expect(@typeInfo(server_init).error_union.error_set == TSrv.InitError);
+    try testing.expect(TCli.InitError == (zanoza.TransportClientError || LoopbackSocket.Error));
+    try testing.expect(TSrv.InitError == (zanoza.TransportServerError || LoopbackSocket.Error));
+}
+
+test "transport initialization preserves a custom socket's declared errors" {
+    const FailingSocket = struct {
+        pub const Error = error{CustomOpenFailed};
+
+        pub fn open(_: zanoza.Address) Error!@This() {
+            return error.CustomOpenFailed;
+        }
+
+        pub fn close(_: *@This()) void {}
+
+        pub fn recvfrom(_: *@This(), _: []u8) ?@import("transport/socket.zig").RecvResult {
+            return null;
+        }
+
+        pub fn sendto(_: *@This(), _: zanoza.Address, _: []const u8) void {}
+    };
+    const C = TransportClient(opts, FailingSocket);
+    const S = TransportServer(opts, FailingSocket);
+    try testing.expect(C.InitError == (zanoza.TransportClientError || FailingSocket.Error));
+    try testing.expect(S.InitError == (zanoza.TransportServerError || FailingSocket.Error));
+    try testing.expectError(error.CustomOpenFailed, C.init(loopbackClientCfg(), cli_addr));
+    try testing.expectError(error.CustomOpenFailed, S.init(testing.allocator, transportServerCfg(), srv_addr));
+
+    var failing_allocator = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var pair: LoopbackSocket.Pair = .{};
+    try testing.expectError(error.OutOfMemory, TSrv.initWithSocket(
+        failing_allocator.allocator(),
+        transportServerCfg(),
+        pair.serverSocket(srv_addr),
+    ));
+}
