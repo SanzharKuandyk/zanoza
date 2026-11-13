@@ -6,6 +6,9 @@ Zanoza provides connection handshakes, configurable message channels, fragmentat
 and client/server transports. Channel buffer and assembly capacities are configured
 at comptime and stored in per-channel state types.
 
+![Ball example](examples/ball/balls.gif)
+
+
 | Channel | Delivery |
 | --- | --- |
 | `Unreliable` | Send once |
@@ -37,8 +40,6 @@ zig build --build-file examples/build.zig pong-client
 
 Ball supports up to four players. Move with `WASD`, open chat with `T`,
 and cancel chat with `Esc`.
-
-![Ball example](examples/ball/balls.gif)
 
 In Pong, move with `W` / `S`, open chat with `T`, and press `Space` to ready up
 after a round. Ball listens on port 9914, and Pong listens on port 9913.
@@ -198,7 +199,7 @@ limits must accommodate incoming messages. Queue capacities are local limits.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `max_clients` | `1024` | Server connection slots |
-| `max_pending_clients` | `null` | Recycled connection-slot queue capacity, derived as `max_clients * 2` |
+| `max_pending_clients` | `null` | Maximum simultaneous pending handshakes. Defaults to `max_clients * 2`; each pending handshake holds a client slot |
 | `max_payload_size` | `1024` | User-data bytes per data packet |
 | `outgoing_queue_size` | `256` | Packets waiting to be sent |
 | `messages_queue_size` | `256` | Incoming message queue and payload-pool capacity |
@@ -210,10 +211,8 @@ limits must accommodate incoming messages. Queue capacities are local limits.
 | `ConnectToken` | `void` | Selects the built-in token type |
 | `channels` | One `Unreliable` channel | Channel schema, up to 128 entries |
 
-Queue sizes, `nonce_window`, and the resolved `max_pending_clients` must be positive
-powers of two. If pending capacity is derived from `max_clients`, that derived
-value must satisfy the same constraint. The configuration validator accepts
-payload capacities between 1 and 65,535 bytes.
+Queue sizes and `nonce_window` must be positive powers of two.
+`max_pending_clients` must be positive. Payload capacities range from 1 to 65,535 bytes.
 
 Each channel has these settings.
 

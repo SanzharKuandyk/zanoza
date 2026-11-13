@@ -13,8 +13,8 @@ pub const ChannelConfig = @import("channel.zig").ChannelConfig;
 /// Both sides must use identical options — the wire format depends on it.
 pub const Options = struct {
     max_clients: usize = 1024,
-    /// Maximum number of clients in the handshake (pending) + recycled slot pool.
-    /// Must be a power of two. Defaults to `max_clients * 2` when null.
+    /// Maximum number of simultaneous pending handshakes. Each holds a client slot.
+    /// Defaults to `max_clients * 2` when null.
     max_pending_clients: ?usize = null,
     nonce_window: usize = 256,
     outgoing_queue_size: usize = 256,

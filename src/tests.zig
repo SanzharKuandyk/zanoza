@@ -76,6 +76,22 @@ fn relayServerToClient(srv: *Srv, cli: *Cli) !void {
 // Handshake
 // ---------------------------------------------------------------------------
 
+test "recent nonces fill and rotate without allocating after initialization" {
+    const Nonces = @import("nonce.zig").RecentNonces(8);
+    var allocator = testing.FailingAllocator.init(testing.allocator, .{});
+    var nonces = try Nonces.init(allocator.allocator());
+    defer nonces.deinit();
+    allocator.fail_index = allocator.alloc_index;
+
+    for (0..24) |nonce| {
+        try testing.expect(nonces.insert(@intCast(nonce)));
+        try testing.expect(!nonces.insert(@intCast(nonce)));
+    }
+    for (0..24) |nonce| {
+        try testing.expectEqual(nonce >= 16, nonces.contains(@intCast(nonce)));
+    }
+}
+
 test "server-client plain connect handshake" {
     var srv = try Srv.init(testing.allocator, serverCfg());
     defer srv.deinit();
@@ -110,6 +126,34 @@ test "server-client plain connect handshake" {
     try testing.expect(srv.pollEvent() == null);
 
     std.debug.print("\n  PASS: server-client plain connect handshake\n", .{});
+}
+
+test "server can retry a handshake response after the outgoing queue fills" {
+    var srv = try Srv.init(testing.allocator, transportServerCfg());
+    defer srv.deinit();
+    var cli = try Cli.init(loopbackClientCfg());
+    defer cli.deinit();
+
+    try cli.connect();
+    try relayClientToServer(&cli, &srv, cli_addr);
+    try relayServerToClient(&srv, &cli);
+
+    const response = cli.peekOutgoing().?;
+    var wire: [packet_mod.maxPacketSize(opts)]u8 = undefined;
+    const len = try packet_mod.serialize(opts, response.packet, &wire);
+    while (srv.outgoing.pushBack(.{ .addr = cli_addr, .packet = .ConnectionAccepted })) {}
+
+    try testing.expectError(error.IoError, srv.handlePacket(cli_addr, wire[0..len]));
+    try testing.expectEqual(@as(usize, 1), srv.pending.count());
+    try testing.expectError(error.UnknownClient, srv.reservePayloadSlot(0));
+    try testing.expectError(error.UnknownClient, srv.reservePayloadSlot(std.math.maxInt(u64)));
+    try testing.expect(srv.peekEvent() == null);
+
+    srv.outgoing.clear();
+    try srv.handlePacket(cli_addr, wire[0..len]);
+    try testing.expectEqual(@as(usize, 0), srv.pending.count());
+    try testing.expect(srv.pollEvent().? == .ClientConnected);
+    try testing.expect(srv.pollOutgoing().?.packet == .ConnectionAccepted);
 }
 
 test "server disconnects client on Disconnect packet" {
@@ -541,6 +585,51 @@ test "transport loopback: client disconnect" {
         }
     }
     return error.DisconnectNotReceived;
+}
+
+test "transport drops queued input when its client disconnects in the same tick" {
+    var pair: LoopbackSocket.Pair = .{};
+    var srv = try TSrv.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+    var cli = try TCli.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+    _ = try connectTransports(&srv, &cli);
+
+    try cli.sendOnChannel(2, "queued before disconnect");
+    cli.disconnect();
+    cli.tick();
+    srv.tick();
+
+    try testing.expect(srv.pollEvent().? == .ClientDisconnected);
+    try testing.expect(srv.peekMessage() == null);
+    try testing.expect(srv.getStateMachine().peekMessage() == null);
+}
+
+test "transport drops queued input after the same client slot is reused" {
+    var pair: LoopbackSocket.Pair = .{};
+    var srv = try TSrv.initWithSocket(testing.allocator, transportServerCfg(), pair.serverSocket(srv_addr));
+    defer srv.deinit();
+    var cli = try TCli.initWithSocket(loopbackClientCfg(), pair.clientSocket(cli_addr));
+    defer cli.deinit();
+    const cid = try connectTransports(&srv, &cli);
+    const raw_server = srv.getStateMachine();
+
+    try cli.sendOnChannel(2, "from the old connection");
+    cli.disconnect();
+    try relayClientToServer(cli.getStateMachine(), raw_server, cli_addr);
+    try testing.expect(raw_server.peekMessage() != null);
+
+    var replacement = try Cli.init(loopbackClientCfg());
+    defer replacement.deinit();
+    try replacement.connect();
+    try relayClientToServer(&replacement, raw_server, cli_addr);
+    try relayServerToClient(raw_server, &replacement);
+    try relayClientToServer(&replacement, raw_server, cli_addr);
+
+    srv.tick();
+    try testing.expect(srv.pollEvent().? == .ClientDisconnected);
+    try testing.expectEqual(cid, srv.pollEvent().?.ClientConnected.cid);
+    try testing.expect(srv.peekMessage() == null);
 }
 
 test "transport loopback: client ignores packets from non-server address" {

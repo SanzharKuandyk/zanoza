@@ -50,6 +50,8 @@ pub fn Server(comptime opts: Options) type {
         pub const RawMessageView = struct {
             header: PayloadHeader,
             cid: u64,
+            slot: usize,
+            connection_sequence: u64,
             payload: Pool.Ref,
         };
 
@@ -77,8 +79,7 @@ pub fn Server(comptime opts: Options) type {
 
         clients: [opts.max_clients]?Conn,
         addr_to_slot: std.AutoArrayHashMapUnmanaged(AddressKey, usize),
-        recycled_slots: RingQueue(u64, pending_cap),
-        slot_cursor: u64,
+        free_slots: std.bit_set.Static(opts.max_clients),
         pending: std.AutoArrayHashMapUnmanaged(AddressKey, PendingConn),
 
         outgoing: RingQueue(Outgoing, opts.outgoing_queue_size),
@@ -96,7 +97,7 @@ pub fn Server(comptime opts: Options) type {
                 .secure = config.secure,
                 .secret_key = config.secret_key,
                 .public_addresses = config.public_addresses,
-                .recent_nonces = RecentNonces(opts.nonce_window).init(allocator),
+                .recent_nonces = try RecentNonces(opts.nonce_window).init(allocator),
                 .challenge_key = config.challenge_key,
                 .challenge_seq = 0,
                 .config = config,
@@ -105,8 +106,7 @@ pub fn Server(comptime opts: Options) type {
                 .current_time = now,
                 .clients = @as([opts.max_clients]?Conn, @splat(null)),
                 .addr_to_slot = .empty,
-                .recycled_slots = .{},
-                .slot_cursor = 0,
+                .free_slots = .full,
                 .pending = .empty,
                 .outgoing = .{},
                 .events = .{},
@@ -126,6 +126,13 @@ pub fn Server(comptime opts: Options) type {
             return @intCast(self.start_time.durationTo(self.current_time).toNanoseconds());
         }
 
+        pub fn getClientSlot(self: *const Self, cid: u64) error{UnknownClient}!usize {
+            const slot = std.math.cast(usize, cid) orelse return error.UnknownClient;
+            if (slot >= opts.max_clients or self.clients[slot] == null) return error.UnknownClient;
+
+            return slot;
+        }
+
         pub fn update(self: *Self, now: std.Io.Timestamp) void {
             self.current_time = now;
             const t = self.getCurrentTime();
@@ -135,6 +142,7 @@ pub fn Server(comptime opts: Options) type {
             while (i > 0) {
                 i -= 1;
                 if (t > self.pending.values()[i].expires_at) {
+                    self.free_slots.set(self.pending.values()[i].slot);
                     self.pending.swapRemoveAt(i);
                 }
             }
@@ -156,30 +164,30 @@ pub fn Server(comptime opts: Options) type {
         }
 
         pub fn sendPayload(self: *Self, cid: u64, body: []const u8) ServerError!void {
-            const slot: usize = @intCast(cid);
-            const conn = &(self.clients[slot] orelse return error.UnknownClient);
+            const slot = try self.getClientSlot(cid);
             if (body.len > opts.max_payload_size) return error.PayloadTooLarge;
 
-            conn.last_send = self.getCurrentTime();
-            const out = self.outgoing.pushBackSlot() orelse return error.IoError;
-            out.* = .{
-                .addr = conn.addr,
-                .packet = .{ .Payload = .{
-                    .len = @intCast(body.len),
-                    .body = undefined,
-                } },
-            };
+            const out = try self.reservePayloadForClient(&self.clients[slot].?);
             @memcpy(out.packet.Payload.body[0..body.len], body);
+            out.packet.Payload.len = @intCast(body.len);
         }
 
-        /// Reserve an outgoing payload slot for direct writes. Returns the
-        /// writable body slice and the Outgoing entry. Caller must fill the
-        /// body and set the length before the next flush.
+        /// Queue a payload entry for direct writes. Fill its body and length before flushing.
         pub fn reservePayloadSlot(self: *Self, cid: u64) ServerError!*Outgoing {
-            const slot: usize = @intCast(cid);
-            const conn = &(self.clients[slot] orelse return error.UnknownClient);
-            conn.last_send = self.getCurrentTime();
+            const slot = try self.getClientSlot(cid);
+            return self.reservePayloadForClient(&self.clients[slot].?);
+        }
+
+        /// Slot-based form used by the transport after it has resolved the client ID.
+        pub fn reservePayloadAt(self: *Self, slot: usize) error{ UnknownClient, IoError }!*Outgoing {
+            if (slot >= self.clients.len) return error.UnknownClient;
+            if (self.clients[slot]) |*conn| return self.reservePayloadForClient(conn);
+            return error.UnknownClient;
+        }
+
+        fn reservePayloadForClient(self: *Self, conn: *Conn) error{IoError}!*Outgoing {
             const out = self.outgoing.pushBackSlot() orelse return error.IoError;
+            conn.last_send = self.getCurrentTime();
             out.* = .{
                 .addr = conn.addr,
                 .packet = .{ .Payload = .{
@@ -275,27 +283,25 @@ pub fn Server(comptime opts: Options) type {
 
                     if (self.protocol_id != fields.protocol_id) return error.InvalidProtocolId;
                     if (self.recent_nonces.contains(fields.client_nonce)) return error.InvalidPacket;
-                    _ = try self.recent_nonces.insert(fields.client_nonce);
+                    if (self.pending.count() >= pending_cap) return error.ServerFull;
+                    const slot = self.free_slots.findFirstSet() orelse return error.ServerFull;
+                    if (self.outgoing.isFull()) return error.IoError;
+                    try self.pending.ensureUnusedCapacity(self.allocator, 1);
+                    if (!self.recent_nonces.insert(fields.client_nonce)) return error.InvalidPacket;
 
-                    const cid: u64 = self.recycled_slots.popFront() orelse blk: {
-                        if (self.slot_cursor >= opts.max_clients) return error.ServerFull;
-                        const s = self.slot_cursor;
-                        self.slot_cursor += 1;
-                        break :blk s;
-                    };
-
-                    self.challenge_seq += 1;
+                    self.free_slots.unset(slot);
+                    self.challenge_seq +%= 1;
                     const expires_at = self.getCurrentTime() + self.config.handshake_alive_ns;
                     const token = handshake.generateChallengeToken(
                         &self.challenge_key,
-                        cid,
+                        @intCast(slot),
                         fields.client_nonce,
                         self.challenge_seq,
                         expires_at,
                     );
 
-                    try self.pending.put(self.allocator, key, .{
-                        .cid = cid,
+                    self.pending.putAssumeCapacityNoClobber(key, .{
+                        .slot = slot,
                         .client_nonce = fields.client_nonce,
                         .sequence = self.challenge_seq,
                         .expires_at = expires_at,
@@ -309,12 +315,13 @@ pub fn Server(comptime opts: Options) type {
                             .expires_at = expires_at,
                             .token = token,
                         } },
-                    })) return error.IoError;
+                    })) unreachable;
                 },
                 .ConnectionResponse => |resp| {
                     const key = AddressKey.fromAddress(addr);
                     const pending = self.pending.get(key) orelse return error.UnknownClient;
                     if (self.getCurrentTime() > pending.expires_at) {
+                        self.free_slots.set(pending.slot);
                         _ = self.pending.swapRemove(key);
                         return error.Expired;
                     }
@@ -322,37 +329,42 @@ pub fn Server(comptime opts: Options) type {
                     const valid = handshake.verifyChallengeToken(
                         resp.token,
                         &self.challenge_key,
-                        pending.cid,
+                        @intCast(pending.slot),
                         pending.client_nonce,
                         resp.sequence,
                         pending.expires_at,
                     );
                     if (!valid) return error.InvalidPacket;
 
+                    if (self.outgoing.isFull() or self.events.isFull()) return error.IoError;
+                    try self.addr_to_slot.ensureUnusedCapacity(self.allocator, 1);
+
                     _ = self.pending.swapRemove(key);
 
-                    const slot: usize = @intCast(pending.cid);
+                    const slot = pending.slot;
+                    const cid: u64 = @intCast(slot);
                     self.clients[slot] = .{
-                        .cid = pending.cid,
+                        .cid = cid,
+                        .sequence = pending.sequence,
                         .addr = addr,
                         .last_recv = self.getCurrentTime(),
                         .last_send = 0,
                         .user_data = pending.user_data,
                     };
-                    try self.addr_to_slot.put(self.allocator, key, slot);
+                    self.addr_to_slot.putAssumeCapacityNoClobber(key, slot);
 
                     if (!self.outgoing.pushBack(.{
                         .addr = addr,
                         .packet = .ConnectionAccepted,
-                    })) return error.IoError;
+                    })) unreachable;
 
                     if (!self.events.pushBack(.{
                         .ClientConnected = .{
-                            .cid = pending.cid,
+                            .cid = cid,
                             .addr = addr,
                             .user_data = pending.user_data,
                         },
-                    })) return error.IoError;
+                    })) unreachable;
                 },
                 .Payload => |payload| {
                     const slot = self.addr_to_slot.get(AddressKey.fromAddress(addr)) orelse return error.UnknownClient;
@@ -360,7 +372,13 @@ pub fn Server(comptime opts: Options) type {
                     conn.last_recv = self.getCurrentTime();
                     // Single copy: wire buffer -> pool.
                     const ref = self.payload_pool.allocCopy(buffer[payload.header.wireSize()..][0..payload.len]) orelse return error.IoError;
-                    if (!self.messages.pushBack(.{ .cid = conn.cid, .header = payload.header, .payload = ref })) {
+                    if (!self.messages.pushBack(.{
+                        .cid = conn.cid,
+                        .slot = slot,
+                        .connection_sequence = conn.sequence,
+                        .header = payload.header,
+                        .payload = ref,
+                    })) {
                         self.payload_pool.release(ref);
                         return error.IoError;
                     }
@@ -377,9 +395,6 @@ pub fn Server(comptime opts: Options) type {
         fn disconnectClient(self: *Self, slot: usize) ServerError!void {
             const conn = self.clients[slot] orelse return error.UnknownClient;
 
-            if (!self.recycled_slots.pushBack(conn.cid)) return error.IoError;
-            errdefer _ = self.recycled_slots.popFront();
-
             if (!self.events.pushBack(.{
                 .ClientDisconnected = .{
                     .cid = conn.cid,
@@ -389,6 +404,7 @@ pub fn Server(comptime opts: Options) type {
 
             self.clients[slot] = null;
             _ = self.addr_to_slot.swapRemove(AddressKey.fromAddress(conn.addr));
+            self.free_slots.set(slot);
         }
     };
 }

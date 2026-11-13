@@ -5,6 +5,7 @@ const Address = @import("../root.zig").Address;
 pub fn Connection(comptime opts: Options) type {
     return struct {
         cid: u64,
+        sequence: u64,
         addr: Address,
         last_recv: u64,
         last_send: u64,
@@ -14,7 +15,7 @@ pub fn Connection(comptime opts: Options) type {
 
 pub fn PendingConnection(comptime opts: Options) type {
     return struct {
-        cid: u64,
+        slot: usize,
         client_nonce: u64,
         sequence: u64,
         expires_at: u64,

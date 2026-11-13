@@ -8,10 +8,12 @@ pub fn RecentNonces(comptime Window: usize) type {
         order: RingQueue(u64, Window),
         seen: std.AutoHashMap(u64, void),
 
-        pub fn init(allocator: std.mem.Allocator) Self {
+        pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Self {
+            var seen = std.AutoHashMap(u64, void).init(allocator);
+            try seen.ensureTotalCapacity(Window);
             return .{
                 .order = .{},
-                .seen = std.AutoHashMap(u64, void).init(allocator),
+                .seen = seen,
             };
         }
 
@@ -24,16 +26,16 @@ pub fn RecentNonces(comptime Window: usize) type {
         }
 
         /// Returns false if nonce was already seen (replay), true if inserted.
-        pub fn insert(self: *Self, nonce: u64) std.mem.Allocator.Error!bool {
+        pub fn insert(self: *Self, nonce: u64) bool {
             if (self.seen.contains(nonce)) return false;
 
             if (self.order.isFull()) {
                 const old = self.order.popFront().?;
-                _ = self.seen.remove(old);
+                if (!self.seen.remove(old)) unreachable;
             }
 
-            _ = self.order.pushBack(nonce);
-            try self.seen.put(nonce, {});
+            if (!self.order.pushBack(nonce)) unreachable;
+            self.seen.putAssumeCapacityNoClobber(nonce, {});
             return true;
         }
     };

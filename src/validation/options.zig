@@ -11,14 +11,14 @@ pub fn validate(comptime opts: root.Options) void {
         if (opts.max_clients == 0)
             @compileError("Options.max_clients must be greater than zero");
 
-        // The server reuses this capacity for the recycled slot queue, which is a RingQueue.
         const pending_cap = opts.max_pending_clients orelse blk: {
             const mul = @mulWithOverflow(opts.max_clients, 2);
             if (mul[1] != 0)
                 @compileError("Options.max_clients is too large to derive default max_pending_clients");
             break :blk mul[0];
         };
-        requirePowerOfTwo("Options.max_pending_clients", pending_cap);
+        if (pending_cap == 0)
+            @compileError("Options.max_pending_clients must be greater than zero");
         requirePowerOfTwo("Options.nonce_window", opts.nonce_window);
         requirePowerOfTwo("Options.outgoing_queue_size", opts.outgoing_queue_size);
         requirePowerOfTwo("Options.events_queue_size", opts.events_queue_size);
