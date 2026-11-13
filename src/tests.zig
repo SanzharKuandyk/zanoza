@@ -129,8 +129,10 @@ test "server-client plain connect handshake" {
 }
 
 test "server can retry a handshake response after the outgoing queue fills" {
-    var srv = try Srv.init(testing.allocator, transportServerCfg());
+    var allocator = testing.FailingAllocator.init(testing.allocator, .{});
+    var srv = try Srv.init(allocator.allocator(), transportServerCfg());
     defer srv.deinit();
+    allocator.fail_index = allocator.alloc_index;
     var cli = try Cli.init(loopbackClientCfg());
     defer cli.deinit();
 

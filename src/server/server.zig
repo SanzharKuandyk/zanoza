@@ -22,9 +22,12 @@ pub fn Server(comptime opts: Options) type {
             validation.connect_token.validate(opts.ConnectToken, opts.user_data_size);
     }
 
-    const pending_cap = opts.max_pending_clients orelse opts.max_clients * 2;
+    // Each pending handshake holds one of the server's client slots.
+    const pending_cap = @min(opts.max_pending_clients orelse opts.max_clients * 2, opts.max_clients);
     const Conn = connection_mod.Connection(opts);
     const PendingConn = connection_mod.PendingConnection(opts);
+    const AddressToSlot = std.AutoArrayHashMapUnmanaged(AddressKey, usize);
+    const PendingConnections = std.AutoArrayHashMapUnmanaged(AddressKey, PendingConn);
     const Pkt = packet_mod.Packet(opts);
     const PayloadHeader = packet_mod.PayloadHeader;
     const Pool = PayloadPool(opts.messages_queue_size, opts.max_payload_size);
@@ -78,9 +81,9 @@ pub fn Server(comptime opts: Options) type {
         current_time: std.Io.Timestamp,
 
         clients: [opts.max_clients]?Conn,
-        addr_to_slot: std.AutoArrayHashMapUnmanaged(AddressKey, usize),
+        addr_to_slot: AddressToSlot,
         free_slots: std.bit_set.Static(opts.max_clients),
-        pending: std.AutoArrayHashMapUnmanaged(AddressKey, PendingConn),
+        pending: PendingConnections,
 
         outgoing: RingQueue(Outgoing, opts.outgoing_queue_size),
         events: RingQueue(Event, opts.events_queue_size),
@@ -88,6 +91,14 @@ pub fn Server(comptime opts: Options) type {
         payload_pool: Pool,
 
         pub fn init(allocator: std.mem.Allocator, config: ServerConfig) ServerError!Self {
+            var addr_to_slot: AddressToSlot = .empty;
+            errdefer addr_to_slot.deinit(allocator);
+            try addr_to_slot.ensureTotalCapacity(allocator, opts.max_clients);
+
+            var pending: PendingConnections = .empty;
+            errdefer pending.deinit(allocator);
+            try pending.ensureTotalCapacity(allocator, pending_cap);
+
             var io_threaded: std.Io.Threaded = .init(allocator, .{});
             errdefer io_threaded.deinit();
             const now = std.Io.Timestamp.now(io_threaded.io(), .awake);
@@ -105,9 +116,9 @@ pub fn Server(comptime opts: Options) type {
                 .start_time = now,
                 .current_time = now,
                 .clients = @as([opts.max_clients]?Conn, @splat(null)),
-                .addr_to_slot = .empty,
+                .addr_to_slot = addr_to_slot,
                 .free_slots = .full,
-                .pending = .empty,
+                .pending = pending,
                 .outgoing = .{},
                 .events = .{},
                 .messages = .{},
@@ -286,7 +297,6 @@ pub fn Server(comptime opts: Options) type {
                     if (self.pending.count() >= pending_cap) return error.ServerFull;
                     const slot = self.free_slots.findFirstSet() orelse return error.ServerFull;
                     if (self.outgoing.isFull()) return error.IoError;
-                    try self.pending.ensureUnusedCapacity(self.allocator, 1);
                     if (!self.recent_nonces.insert(fields.client_nonce)) return error.InvalidPacket;
 
                     self.free_slots.unset(slot);
@@ -337,7 +347,6 @@ pub fn Server(comptime opts: Options) type {
                     if (!valid) return error.InvalidPacket;
 
                     if (self.outgoing.isFull() or self.events.isFull()) return error.IoError;
-                    try self.addr_to_slot.ensureUnusedCapacity(self.allocator, 1);
 
                     _ = self.pending.swapRemove(key);
 
